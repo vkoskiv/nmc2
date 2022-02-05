@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
+#include <pthread.h>
 
 struct color {
 	uint8_t red;
@@ -43,6 +44,7 @@ struct user {
 	char *user_name;
 	char uuid[UUID_STR_LEN];
 	struct mg_connection *socket;
+	struct mg_timer tile_increment_timer;
 	bool is_authenticated;
 	bool is_shadow_banned;
 	
@@ -67,12 +69,55 @@ struct canvas {
 	struct user *users;
 	uint8_t *tiles;
 	uint32_t edge_length;
+	pthread_mutex_t ws_mutex;
+	struct mg_timer ws_ping_timer;
 };
+
+// threading
+struct nmc_thread {
+	pthread_t thread_id;
+	void *user_data;
+	void *(*thread_fn)(void *);
+};
+
+void *thread_stub(void *arg) {
+	return ((struct nmc_thread *)arg)->thread_fn(arg);
+}
+
+void *thread_userdata(void *arg) {
+	struct nmc_thread *thread = (struct nmc_thread *)arg;
+	return thread->user_data;
+}
+
+void thread_wait(struct nmc_thread *t) {
+	if (pthread_join(t->thread_id, NULL)) {
+		printf("pthread frozen");
+		exit(-1);
+	}
+}
+
+void thread_start(struct nmc_thread *t) {
+	pthread_attr_t attribs;
+	pthread_attr_init(&attribs);
+	pthread_attr_setdetachstate(&attribs, PTHREAD_CREATE_JOINABLE);
+	pthread_create(&t->thread_id, &attribs, thread_stub, t);
+	pthread_attr_destroy(&attribs);
+}
+
+// end threading
+
+// timing
+
+void sleep_ms(int ms) {
+	usleep(ms * 1000);
+}
+
+// end timing
 
 static struct canvas g_canvas;
 
-static const char *s_listen_on = "ws://localhost:8000";
-// static const char *s_web_root = ".";
+static const char *s_listen_on = "ws://0.0.0.0:3001";
+static const char *s_web_root = ".";
 
 void generate_uuid(char *buf) {
 	if (!buf) return;
@@ -91,10 +136,13 @@ char *str_cpy(const char *source) {
 	return copy;
 }
 
+// *should* be thread-safe now, maybe.
 void send_json(const cJSON *payload, struct user user) {
 	char *str = cJSON_PrintUnformatted(payload);
 	if (!str) return;
+	pthread_mutex_lock(&g_canvas.ws_mutex);
 	mg_ws_send(user.socket, str, strlen(str), WEBSOCKET_OP_TEXT);
+	pthread_mutex_unlock(&g_canvas.ws_mutex);
 	free(str);
 }
 
@@ -115,6 +163,23 @@ cJSON *error_response(char *error_message) {
 	cJSON_AddStringToObject(error, "responseType", "error");
 	cJSON_AddStringToObject(error, "errorMessage", error_message);
 	return error;
+}
+
+void ws_ping_thread(void *arg) {
+	struct user *user = (struct user *)thread_userdata(arg);
+}
+
+static void user_tile_increment_fn(void *arg) {
+	struct user *user = (struct user *)arg;
+
+	
+
+
+	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
+}
+
+void start_user_timer(struct user *user, struct mg_mgr *mgr) {
+	mg_timer_init(&user->tile_increment_timer, user->tile_regen_seconds, MG_TIMER_REPEAT, user_tile_increment_fn, user);
 }
 
 cJSON *handle_initial_auth(struct mg_connection *socket) {
@@ -167,6 +232,14 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	//FIXME: For now, just pretend we know the user and everything is fine.
 	
 	arrput(g_canvas.users, user);
+	struct user *uptr = &g_canvas.users[arrlenu(g_canvas.users) - 1];
+
+	size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
+	size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
+	// This is how it was in the original, might want to check
+	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
+
+
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -298,8 +371,8 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
 			//mg_http_reply(c, 200, "", "{\"result\": %d}\n", 123);
 		} else {
 			// Serve static files
-			//struct mg_http_serve_opts opts = {.root_dir = s_web_root};
-			//mg_http_serve_dir(c, ev_data, &opts);
+			struct mg_http_serve_opts opts = {.root_dir = s_web_root};
+			mg_http_serve_dir(c, ev_data, &opts);
 		}
 	} else if (ev == MG_EV_WS_MSG) {
 		struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
@@ -314,13 +387,24 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
 	(void) fn_data;
 }
 
+static void ping_timer_fn(void *arg) {
+	struct mg_mgr *mgr = (struct mg_mgr *)arg;
+	for (struct mg_connection *c = mgr->conns; c != NULL && c->is_websocket; c = c->next) {
+		//printf("%d Sending PING to connection %lu with label %s\n", (unsigned)time(NULL), c->id, c->label);
+		mg_ws_send(c, NULL, 0, WEBSOCKET_OP_PING);
+	}
+}
+
 int main(void) {
 	g_canvas.edge_length = 512;
 	size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
 	g_canvas.tiles = calloc(tiles, 1);
+	g_canvas.ws_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
 	memset(g_canvas.tiles, 3, tiles);
 	struct mg_mgr mgr;  // Event manager
 	mg_mgr_init(&mgr);  // Initialise event manager
+	//ws ping loop. TODO: Probably do this from the client side instead.
+	mg_timer_init(&g_canvas.ws_ping_timer, 25000, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
 	printf("Starting WS listener on %s/canvas\n", s_listen_on);
 	mg_http_listen(&mgr, s_listen_on, fn, NULL);  // Create HTTP listener
 	for (;;) mg_mgr_poll(&mgr, 1000);             // Infinite event loop
