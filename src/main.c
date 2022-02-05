@@ -1,7 +1,4 @@
-// Copyright (c) 2020 Cesanta Software Limited
-// All rights reserved
-//
-// Example Websocket server. See https://mongoose.ws/tutorials/websocket-server/
+// Copyright (c) 2022 Valtteri Koskivuori (vkoskiv). All rights reserved.
 
 #define STB_DS_IMPLEMENTATION
 #include "vendored/stb_ds.h"
@@ -284,10 +281,9 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	return error_response("Unknown requestType");
 }
 
-// This RESTful server implements the following endpoints:
-//   /websocket - upgrade to Websocket, and implement websocket echo server
-//   /api/rest - respond with JSON string {"result": 123}
-//   any other URI serves static files from s_web_root
+// Websocket example code is:
+// Copyright (c) 2020 Cesanta Software Limited
+// All rights reserved
 static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
 	if (ev == MG_EV_OPEN) {
 		// c->is_hexdumping = 1;
