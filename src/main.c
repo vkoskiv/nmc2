@@ -9,7 +9,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
-#include <pthread.h>
 
 struct color {
 	uint8_t red;
@@ -69,42 +68,8 @@ struct canvas {
 	struct user *users;
 	uint8_t *tiles;
 	uint32_t edge_length;
-	pthread_mutex_t ws_mutex;
 	struct mg_timer ws_ping_timer;
 };
-
-// threading
-struct nmc_thread {
-	pthread_t thread_id;
-	void *user_data;
-	void *(*thread_fn)(void *);
-};
-
-void *thread_stub(void *arg) {
-	return ((struct nmc_thread *)arg)->thread_fn(arg);
-}
-
-void *thread_userdata(void *arg) {
-	struct nmc_thread *thread = (struct nmc_thread *)arg;
-	return thread->user_data;
-}
-
-void thread_wait(struct nmc_thread *t) {
-	if (pthread_join(t->thread_id, NULL)) {
-		printf("pthread frozen");
-		exit(-1);
-	}
-}
-
-void thread_start(struct nmc_thread *t) {
-	pthread_attr_t attribs;
-	pthread_attr_init(&attribs);
-	pthread_attr_setdetachstate(&attribs, PTHREAD_CREATE_JOINABLE);
-	pthread_create(&t->thread_id, &attribs, thread_stub, t);
-	pthread_attr_destroy(&attribs);
-}
-
-// end threading
 
 // timing
 
@@ -140,9 +105,7 @@ char *str_cpy(const char *source) {
 void send_json(const cJSON *payload, struct user user) {
 	char *str = cJSON_PrintUnformatted(payload);
 	if (!str) return;
-	pthread_mutex_lock(&g_canvas.ws_mutex);
 	mg_ws_send(user.socket, str, strlen(str), WEBSOCKET_OP_TEXT);
-	pthread_mutex_unlock(&g_canvas.ws_mutex);
 	free(str);
 }
 
@@ -165,15 +128,8 @@ cJSON *error_response(char *error_message) {
 	return error;
 }
 
-void ws_ping_thread(void *arg) {
-	struct user *user = (struct user *)thread_userdata(arg);
-}
-
 static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
-
-	
-
 
 	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
 }
@@ -400,7 +356,6 @@ int main(void) {
 	g_canvas.edge_length = 512;
 	size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
 	g_canvas.tiles = calloc(tiles, 1);
-	g_canvas.ws_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
 	memset(g_canvas.tiles, 3, tiles);
 	struct mg_mgr mgr;  // Event manager
 	mg_mgr_init(&mgr);  // Initialise event manager
