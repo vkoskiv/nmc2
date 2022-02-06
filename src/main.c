@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
+#include <math.h>
+#include <signal.h>
 
 struct color {
 	uint8_t red;
@@ -71,6 +73,7 @@ struct canvas {
 	uint8_t *tiles;
 	uint32_t edge_length;
 	struct mg_timer ws_ping_timer;
+	sqlite3 *backing_db; // For persistence
 };
 
 // timing
@@ -82,6 +85,7 @@ void sleep_ms(int ms) {
 // end timing
 
 static struct canvas g_canvas;
+static bool g_running = true;
 
 static const char *s_listen_on = "ws://0.0.0.0:3001";
 static const char *s_web_root = ".";
@@ -348,20 +352,116 @@ static void ping_timer_fn(void *arg) {
 	}
 }
 
+void ensure_valid_db(sqlite3 *db) {
+	// TODO: Check that this DB has all the tables we need.
+	// Create them if needed.
+}
+
+bool load_users(struct canvas *c) {
+	sqlite3_stmt *query;
+	sqlite3_prepare_v2(c->backing_db, "select * from users", -1, &query, NULL);
+
+	printf("Loading users...\n");
+	while (sqlite3_step(query) != SQLITE_DONE) {
+		struct user user = { 0 };
+		size_t columns = sqlite3_column_count(query);
+		
+	}
+	return false;
+}
+
+bool load_tiles(struct canvas *c) {
+	//First figure out how many tiles there are to get the canvas size
+	printf("Getting tile count\n");
+	sqlite3_stmt *count_query;
+	int ret = sqlite3_prepare_v2(c->backing_db, "SELECT COUNT(*) FROM tiles", -1, &count_query, NULL);
+	if (ret != SQLITE_OK) {
+		printf("Failed\n");
+		sqlite3_finalize(count_query);
+		return true;
+	}
+	ret = sqlite3_step(count_query);
+	if (ret != SQLITE_ROW) {
+		printf("No rows in COUNT(*)\n");
+		sqlite3_finalize(count_query);
+		return true;
+	}
+	size_t rows = sqlite3_column_int(count_query, 0);
+	c->edge_length = sqrt(rows);
+	sqlite3_finalize(count_query);
+
+	g_canvas.tiles = calloc(g_canvas.edge_length * g_canvas.edge_length, 1);
+	printf("Loading %ux%u canvas...\n", c->edge_length, c->edge_length);
+
+	sqlite3_stmt *query;
+	sqlite3_prepare_v2(c->backing_db, "select * from tiles", -1, &query, NULL);
+
+	while (sqlite3_step(query) != SQLITE_DONE) {
+		size_t columns = sqlite3_column_count(query);
+		
+		size_t x = sqlite3_column_int(query, 1);
+		size_t y = sqlite3_column_int(query, 2);
+		size_t id = sqlite3_column_int(query, 3);
+		//char *last_modifier = sqlite3_column_text(query, 4);
+		//uint64_t place_time = sqlite3_column_int64(query, 5);
+		g_canvas.tiles[x + y * g_canvas.edge_length] = id;
+	}
+	sqlite3_finalize(query);
+	return false;
+}
+
+bool set_up_db(struct canvas *c) {
+	int ret = 0;
+	ret = sqlite3_open("pikselit2022.db", &c->backing_db);
+	if (ret != SQLITE_OK) {
+		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(c->backing_db));
+		sqlite3_close(c->backing_db);
+		return true;
+	}
+
+	ensure_valid_db(c->backing_db);
+	//load_users(c);
+	load_tiles(c);
+
+	return false;
+}
+
+// Intersect ^C to safely shut down
+void (*signal(int signo, void (*func)(int)))(int);
+typedef void sigfunc(int);
+sigfunc *signal(int, sigfunc*);
+
+void sigint_handler(int sig) {
+	if (sig == 2) {
+		printf("Received SIGINT, stopping.\n");
+		g_running = false;
+	}
+}
+
 int main(void) {
+	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
+		printf("Failed to register sigint handler\n");
+		return -1;
+	}
 	printf("Using SQLite v%s\n", sqlite3_libversion());
-	g_canvas.edge_length = 512;
-	size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
-	g_canvas.tiles = calloc(tiles, 1);
-	memset(g_canvas.tiles, 3, tiles);
+	if (set_up_db(&g_canvas)) {
+		printf("Failed to set up db\n");
+		return -1;
+	}
+	//g_canvas.edge_length = 512;
+	//size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
+	//g_canvas.tiles = calloc(tiles, 1);
+	//memset(g_canvas.tiles, 3, tiles);
 	struct mg_mgr mgr;
 	mg_mgr_init(&mgr);
 	//ws ping loop. TODO: Probably do this from the client side instead.
 	mg_timer_init(&g_canvas.ws_ping_timer, 25000, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
 	printf("Starting WS listener on %s/ws\n", s_listen_on);
 	mg_http_listen(&mgr, s_listen_on, callback_fn, NULL);
-	for (;;) mg_mgr_poll(&mgr, 1000);
+	while (g_running) mg_mgr_poll(&mgr, 1000);
+	printf("Closing db\n");
 	mg_mgr_free(&mgr);
 	free(g_canvas.tiles);
+	sqlite3_close(g_canvas.backing_db);
 	return 0;
 }
