@@ -5,7 +5,7 @@
 #include "vendored/mongoose.h"
 #include "vendored/cJSON.h"
 #include <uuid/uuid.h>
-#include <mysql.h>
+#include <sqlite3.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <time.h>
@@ -396,6 +396,7 @@ static void ping_timer_fn(void *arg) {
 }
 
 int main(void) {
+	printf("Using SQLite v%s\n", sqlite3_libversion());
 	g_canvas.edge_length = 512;
 	size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
 	g_canvas.tiles = calloc(tiles, 1);

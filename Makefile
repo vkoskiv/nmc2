@@ -1,6 +1,6 @@
 CC=cc
-CFLAGS=-Wall -Wextra -Wno-missing-field-initializers -std=c99 -D_GNU_SOURCE -O2 $$(mysql_config --cflags) $$(pkg-config --cflags uuid)
-LDFLAGS=-lpthread -lm $$(mysql_config --libs) $$(pkg-config --libs uuid)
+CFLAGS=-Wall -Wextra -Wno-missing-field-initializers -std=c99 -D_GNU_SOURCE -O2 $$(pkg-config --cflags uuid)
+LDFLAGS=-lpthread -lm -lsqlite3 $$(pkg-config --libs uuid)
 BIN=bin/nmc2
 OBJDIR=bin/obj
 SRCS=$(shell find . -name '*.c')
