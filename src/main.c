@@ -17,6 +17,8 @@ struct color {
 	uint16_t color_id;
 };
 
+// These come from the original implementation here:
+// https://github.com/vkoskiv/NoMansCanvas
 static struct color g_color_list[] = {
 	{255, 255, 255,  3},
 	{221, 221, 221, 10},
@@ -310,28 +312,24 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	return error_response("Unknown requestType");
 }
 
-// Websocket example code is:
-// Copyright (c) 2020 Cesanta Software Limited
-// All rights reserved
-static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
-	if (ev == MG_EV_OPEN) {
-		// c->is_hexdumping = 1;
-	} else if (ev == MG_EV_HTTP_MSG) {
-		struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-		if (mg_http_match_uri(hm, "/canvas")) {
-			// Upgrade to websocket. From now on, a connection is a full-duplex
-			// Websocket connection, which will receive MG_EV_WS_MSG events.
-			mg_ws_upgrade(c, hm, NULL);
-		} else if (mg_http_match_uri(hm, "/rest")) {
-			// Serve REST response
-			//mg_http_reply(c, 200, "", "{\"result\": %d}\n", 123);
-		} else {
-			// Serve static files
-			struct mg_http_serve_opts opts = {.root_dir = s_web_root};
-			mg_http_serve_dir(c, ev_data, &opts);
+static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
+	(void)fn_data; // TODO: Pass around a canvas instead of having that global up there
+	if (event_type == MG_EV_HTTP_MSG) {
+		struct mg_http_message *msg = (struct mg_http_message *)event_data;
+		if (mg_http_match_uri(msg, "/ws")) {
+			mg_ws_upgrade(c, msg, NULL);
+		} else if (mg_http_match_uri(msg, "/canvas")) {
+			//TODO: Return canvas encoded as a PNG
+			mg_http_reply(c, 200, "", "Unimplemented");
+		} else if (mg_http_match_uri(msg, "/message")) {
+			//TODO: Handle message
+			mg_http_reply(c, 200, "", "Unimplemented");
+		} else if (mg_http_match_uri(msg, "/shutdown")) {
+			//TODO: Handle shutdown
+			mg_http_reply(c, 200, "", "Unimplemented");
 		}
-	} else if (ev == MG_EV_WS_MSG) {
-		struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
+	} else if (event_type == MG_EV_WS_MSG) {
+		struct mg_ws_message *wm = (struct mg_ws_message *)event_data;
 		cJSON *response = handle_command(wm->data.ptr, wm->data.len, c);
 		char *response_str = cJSON_PrintUnformatted(response);
 		if (response_str) {
@@ -340,7 +338,6 @@ static void fn(struct mg_connection *c, int ev, void *ev_data, void *fn_data) {
 		}
 		cJSON_Delete(response);
 	}
-	(void) fn_data;
 }
 
 static void ping_timer_fn(void *arg) {
@@ -357,13 +354,13 @@ int main(void) {
 	size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
 	g_canvas.tiles = calloc(tiles, 1);
 	memset(g_canvas.tiles, 3, tiles);
-	struct mg_mgr mgr;  // Event manager
-	mg_mgr_init(&mgr);  // Initialise event manager
+	struct mg_mgr mgr;
+	mg_mgr_init(&mgr);
 	//ws ping loop. TODO: Probably do this from the client side instead.
 	mg_timer_init(&g_canvas.ws_ping_timer, 25000, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
-	printf("Starting WS listener on %s/canvas\n", s_listen_on);
-	mg_http_listen(&mgr, s_listen_on, fn, NULL);  // Create HTTP listener
-	for (;;) mg_mgr_poll(&mgr, 1000);             // Infinite event loop
+	printf("Starting WS listener on %s/ws\n", s_listen_on);
+	mg_http_listen(&mgr, s_listen_on, callback_fn, NULL);
+	for (;;) mg_mgr_poll(&mgr, 1000);
 	mg_mgr_free(&mgr);
 	free(g_canvas.tiles);
 	return 0;
