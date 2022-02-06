@@ -313,7 +313,7 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 }
 
 static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
-	(void)fn_data; // TODO: Pass around a canvas instead of having that global up there
+	(void)arg; // TODO: Pass around a canvas instead of having that global up there
 	if (event_type == MG_EV_HTTP_MSG) {
 		struct mg_http_message *msg = (struct mg_http_message *)event_data;
 		if (mg_http_match_uri(msg, "/ws")) {
