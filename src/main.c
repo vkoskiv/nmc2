@@ -19,6 +19,12 @@ struct color {
 	uint16_t color_id;
 };
 
+
+// We default to the canvas size found in an existing db.
+// If the db is new, we fall back to this value and create
+// it based on that.
+#define NEW_DB_CANVAS_SIZE 512
+
 // These come from the original implementation here:
 // https://github.com/vkoskiv/NoMansCanvas
 static struct color g_color_list[] = {
@@ -107,17 +113,16 @@ char *str_cpy(const char *source) {
 	return copy;
 }
 
-// *should* be thread-safe now, maybe.
-void send_json(const cJSON *payload, struct user user) {
+void send_json(const cJSON *payload, struct user *user) {
 	char *str = cJSON_PrintUnformatted(payload);
 	if (!str) return;
-	mg_ws_send(user.socket, str, strlen(str), WEBSOCKET_OP_TEXT);
+	mg_ws_send(user->socket, str, strlen(str), WEBSOCKET_OP_TEXT);
 	free(str);
 }
 
 void broadcast(const cJSON *payload) {
 	for (size_t i = 0; i < arrlenu(g_canvas.users); ++i) {
-		send_json(payload, g_canvas.users[i]);
+		send_json(payload, &g_canvas.users[i]);
 	}
 }
 
@@ -137,11 +142,70 @@ cJSON *error_response(char *error_message) {
 static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
 
+	user->remaining_tiles++;
+	cJSON *payload = base_response("incrementTileCount");
+	cJSON_AddStringToObject(payload, "amount", "1");
+	send_json(payload, user);
+	cJSON_Delete(payload);
+
 	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
 }
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr) {
 	mg_timer_init(&user->tile_increment_timer, user->tile_regen_seconds, MG_TIMER_REPEAT, user_tile_increment_fn, user);
+}
+
+void add_user(struct user *user) {
+	sqlite3_stmt *query;
+	const char *sql =
+		"INSERT INTO users (username, uuid, remainingTiles, tileRegenSeconds, totalTilesPlaced, lastConnected, availableColors, level, hasSetUsername, isShadowBanned, maxTiles, tilesToNextLevel, levelProgress)"
+		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	if (ret != SQLITE_OK) {
+		printf("Failed to prepare user insert query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	int idx = 1;
+	sqlite3_bind_text(query, idx++, user->user_name, strlen(user->user_name), NULL);
+	sqlite3_bind_text(query, idx++, user->uuid, strlen(user->uuid), NULL);
+	sqlite3_bind_int(query, idx++, user->remaining_tiles);
+	sqlite3_bind_int(query, idx++, user->tile_regen_seconds);
+	sqlite3_bind_int(query, idx++, user->total_tiles_placed);
+	sqlite3_bind_int64(query, idx++, user->last_connected_unix);
+	sqlite3_bind_text(query, idx++, "", 1, NULL); // Not sure if this is okay to do
+	sqlite3_bind_int(query, idx++, user->level);
+	sqlite3_bind_int(query, idx++, str_eq(user->user_name, "Anonymous") ? 1 : 0);
+	sqlite3_bind_int(query, idx++, user->is_shadow_banned);
+	sqlite3_bind_int(query, idx++, user->max_tiles);
+	sqlite3_bind_int(query, idx++, user->tiles_to_next_level);
+	sqlite3_bind_int(query, idx++, user->current_level_progress);
+
+	ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to insert user: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+}
+
+void update_user(struct user *user) {
+	
+}
+
+bool user_exists(char *uuid) {
+	sqlite3_stmt *query;
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, "SELECT * FROM users WHERE uuid = ?", -1, &query, 0);
+	if (ret != SQLITE_OK) return false;
+	ret = sqlite3_bind_text(query, 1, uuid, strlen(uuid), NULL);
+	if (ret != SQLITE_OK) return false;
+	int step = sqlite3_step(query);
+	bool found = false;
+	if (step == SQLITE_ROW) found = true;
+	sqlite3_finalize(query);
+	return found;
 }
 
 cJSON *handle_initial_auth(struct mg_connection *socket) {
@@ -196,12 +260,14 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	arrput(g_canvas.users, user);
 	struct user *uptr = &g_canvas.users[arrlenu(g_canvas.users) - 1];
 
+	start_user_timer(uptr, socket->mgr);
+
 	size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
 	size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
 	// This is how it was in the original, might want to check
 	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
 
-
+	
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -352,22 +418,124 @@ static void ping_timer_fn(void *arg) {
 	}
 }
 
-void ensure_valid_db(sqlite3 *db) {
-	// TODO: Check that this DB has all the tables we need.
-	// Create them if needed.
+void ensure_tiles_table(sqlite3 *db) {
+	sqlite3_stmt *query;
+	char *schema =
+		"CREATE TABLE IF NOT EXISTS `tiles` ("
+		"`id` integer  NOT NULL PRIMARY KEY AUTOINCREMENT"
+		",  `X` integer NOT NULL"
+		",  `Y` integer NOT NULL"
+		",  `colorID` integer NOT NULL"
+		",  `lastModifier` varchar(255) NOT NULL"
+		",  `placeTime` integer NOT NULL"
+		")";
+
+	sqlite3_prepare_v2(db, schema, -1, &query, NULL);
+	int ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to create tiles table\n");
+		sqlite3_close(db);
+		exit(-1);
+	}
+	// Next, ensure we've got tiles in there.
+	sqlite3_stmt *count;
+	ret = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tiles", -1, &count, NULL);
+	if (ret != SQLITE_OK) {
+		printf("Failed to create count query\n");
+		sqlite3_finalize(count);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	ret = sqlite3_step(count);
+	if (ret != SQLITE_ROW) {
+		printf("No rows in tile init COUNT(*)\n");
+		sqlite3_finalize(count);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	size_t rows = sqlite3_column_int(count, 0);
+
+	sqlite3_stmt *bt;
+	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
+	ret = sqlite3_step(bt);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to begin transaction\n");
+		sqlite3_finalize(bt);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	sqlite3_finalize(bt);
+
+	if (rows == 0) {
+		printf("%u Running initial tile db init...\n", (unsigned)time(NULL));
+		sqlite3_stmt *insert;
+		
+		for (size_t y = 0; y < NEW_DB_CANVAS_SIZE; ++y) {
+			for (size_t x = 0; x < NEW_DB_CANVAS_SIZE; ++x) {
+				ret = sqlite3_prepare_v2(db, "INSERT INTO tiles (X, Y, colorID, lastModifier, placeTime) VALUES (?, ?, 3, \"\", 0)", -1, &insert, NULL);
+				if (ret != SQLITE_OK) printf("Failed to prepare tile insert: %s\n", sqlite3_errmsg(db));
+				ret = sqlite3_bind_int(insert, 1, x);
+				if (ret != SQLITE_OK) printf("Failed to bind x: %s\n", sqlite3_errmsg(db));
+				ret = sqlite3_bind_int(insert, 2, y);
+				if (ret != SQLITE_OK) printf("Failed to bind y: %s\n", sqlite3_errmsg(db));
+				int res = sqlite3_step(insert);
+				if (res != SQLITE_DONE) {
+					printf("Failed to insert for x = %lu, y = %lu\n", x, y);
+					sqlite3_finalize(insert);
+					sqlite3_close(db);
+					exit(-1);
+				}
+				sqlite3_finalize(insert);
+			}
+		}
+
+		sqlite3_stmt *et;
+		sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
+		ret = sqlite3_step(et);
+		if (ret != SQLITE_DONE) {
+			printf("Failed to commit transaction\n");
+			sqlite3_finalize(et);
+			sqlite3_close(db);
+			exit(-1);
+		}
+		sqlite3_finalize(et);
+
+		printf("%u db init done.\n", (unsigned)time(NULL));
+	}
 }
 
-bool load_users(struct canvas *c) {
+void ensure_users_table(sqlite3 *db) {
 	sqlite3_stmt *query;
-	sqlite3_prepare_v2(c->backing_db, "select * from users", -1, &query, NULL);
-
-	printf("Loading users...\n");
-	while (sqlite3_step(query) != SQLITE_DONE) {
-		struct user user = { 0 };
-		size_t columns = sqlite3_column_count(query);
-		
+	char *schema =
+				"CREATE TABLE IF NOT EXISTS `users` ("
+  				"`id` integer  NOT NULL PRIMARY KEY AUTOINCREMENT"
+				",  `username` varchar(255) NOT NULL"
+				",  `uuid` varchar(255) NOT NULL"
+				",  `remainingTiles` integer NOT NULL"
+				",  `tileRegenSeconds` integer NOT NULL"
+				",  `totalTilesPlaced` integer NOT NULL"
+				",  `lastConnected` integer NOT NULL"
+				",  `availableColors` varchar(255) NOT NULL"
+				",  `level` integer NOT NULL"
+				",  `hasSetUsername` integer  NOT NULL"
+				",  `isShadowBanned` integer  NOT NULL"
+				",  `maxTiles` integer NOT NULL"
+				",  `tilesToNextLevel` integer NOT NULL"
+				",  `levelProgress` integer NOT NULL"
+				")";
+	sqlite3_prepare_v2(db, schema, -1, &query, NULL);
+	int ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to create users table: %s\n", sqlite3_errmsg(db));
+		sqlite3_finalize(query);
+		sqlite3_close(db);
+		exit(-1);
 	}
-	return false;
+}
+
+void ensure_valid_db(sqlite3 *db) {
+	ensure_tiles_table(db);
+	ensure_users_table(db);
 }
 
 bool load_tiles(struct canvas *c) {
@@ -402,6 +570,7 @@ bool load_tiles(struct canvas *c) {
 		size_t x = sqlite3_column_int(query, 1);
 		size_t y = sqlite3_column_int(query, 2);
 		size_t id = sqlite3_column_int(query, 3);
+		//FIXME: Figure out if we care about these two anymore
 		//char *last_modifier = sqlite3_column_text(query, 4);
 		//uint64_t place_time = sqlite3_column_int64(query, 5);
 		g_canvas.tiles[x + y * g_canvas.edge_length] = id;
@@ -412,7 +581,8 @@ bool load_tiles(struct canvas *c) {
 
 bool set_up_db(struct canvas *c) {
 	int ret = 0;
-	ret = sqlite3_open("pikselit2022.db", &c->backing_db);
+	//ret = sqlite3_open("pikselit2022.db", &c->backing_db);
+	ret = sqlite3_open(":memory:", &c->backing_db);
 	if (ret != SQLITE_OK) {
 		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_close(c->backing_db);
@@ -420,7 +590,6 @@ bool set_up_db(struct canvas *c) {
 	}
 
 	ensure_valid_db(c->backing_db);
-	//load_users(c);
 	load_tiles(c);
 
 	return false;
@@ -448,10 +617,6 @@ int main(void) {
 		printf("Failed to set up db\n");
 		return -1;
 	}
-	//g_canvas.edge_length = 512;
-	//size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
-	//g_canvas.tiles = calloc(tiles, 1);
-	//memset(g_canvas.tiles, 3, tiles);
 	struct mg_mgr mgr;
 	mg_mgr_init(&mgr);
 	//ws ping loop. TODO: Probably do this from the client side instead.
