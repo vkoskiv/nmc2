@@ -2,7 +2,7 @@
 
 nmc2 - new backend websocket server for No Man's Canvas
 
-Dependencies: sqlite3, uuid
+Dependencies: sqlite3, uuid, recent gcc with nested function support
 To build: make -j4
 To run: bin/nmc2
 
