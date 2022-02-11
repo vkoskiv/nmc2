@@ -1,7 +1,5 @@
 // Copyright (c) 2022 Valtteri Koskivuori (vkoskiv). All rights reserved.
 
-#define STB_DS_IMPLEMENTATION
-#include "vendored/stb_ds.h"
 #include "vendored/mongoose.h"
 #include "vendored/cJSON.h"
 #include <uuid/uuid.h>
@@ -49,6 +47,89 @@ static struct color g_color_list[] = {
 
 #define COLOR_AMOUNT (sizeof(g_color_list) / sizeof(struct color))
 
+// q&d linked list
+
+struct list_elem {
+	struct list_elem *next;
+	size_t thing_size;
+	void *thing;
+};
+
+struct list {
+	struct list_elem *first;
+};
+
+#define LIST_INITIALIZER (struct list){ .first = NULL }
+
+struct list_elem *_list_find_head(struct list *list) {
+	if (!list->first) return NULL;
+	struct list_elem *head = list->first;
+	while (head->next) head = head->next;
+	return head;
+}
+
+bool list_empty(struct list *list) {
+	return !_list_find_head(list);
+}
+
+size_t list_elems(struct list *list) {
+	size_t elems = 0;
+	struct list_elem *head = list->first;
+	while (head) {
+		elems++;
+		head = head->next;
+	}
+	return elems;
+}
+
+struct list_elem *list_new_elem(const void *thing, size_t thing_size) {
+	struct list_elem *elem = calloc(1, sizeof(*elem));
+	elem->thing_size = thing_size;
+	elem->thing = calloc(1, elem->thing_size);
+	memcpy(elem->thing, thing, elem->thing_size);
+	return elem;
+}
+
+struct list_elem *_list_append(struct list *list, const void *thing, size_t thing_size) {
+	if (!list) return NULL;
+	if (!thing) return NULL;
+	if (!thing_size) return NULL;
+	if (!list->first) {
+		list->first = list_new_elem(thing, thing_size);
+		return list->first;
+	}
+	struct list_elem *head = _list_find_head(list);
+	head->next = list_new_elem(thing, thing_size);
+	return head->next;
+}
+
+void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
+	struct list_elem *current = list->first;
+	struct list_elem *prev = current;
+	while (current) {
+		if (check_cb(current->thing)) {
+			prev->next = current->next;
+			if (current == list->first) {
+				list->first = current->next;
+			}
+			if (current->thing) free(current->thing);
+			free(current);
+			return;
+		}
+		prev = current;
+		current = current->next;
+	}
+}
+
+#define list_remove(list, ...) \
+	bool check_##item(void *arg) __VA_ARGS__\
+	_list_remove(&list, check_##item)
+
+#define list_append(list, thing) _list_append(&list, &thing, sizeof(thing))
+#define list_foreach(element, list) for (element = list.first; element; element = element->next)
+
+// end linked list
+
 struct user {
 	char *user_name;
 	char uuid[UUID_STR_LEN];
@@ -75,7 +156,7 @@ struct tile {
 };
 
 struct canvas {
-	struct user *users;
+	struct list connected_users;
 	uint8_t *tiles;
 	uint32_t edge_length;
 	struct mg_timer ws_ping_timer;
@@ -121,8 +202,11 @@ void send_json(const cJSON *payload, struct user *user) {
 }
 
 void broadcast(const cJSON *payload) {
-	for (size_t i = 0; i < arrlenu(g_canvas.users); ++i) {
-		send_json(payload, &g_canvas.users[i]);
+	//FIXME: Make list_foreach more ergonomic
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		send_json(payload, user);
 	}
 }
 
@@ -208,6 +292,16 @@ bool user_exists(char *uuid) {
 	return found;
 }
 
+void dump_connected_users(void) {
+	struct list_elem *head = NULL;
+	printf("Connected users:\n");
+	list_foreach(head, g_canvas.connected_users) {
+		struct user *user = (struct user *)head->thing;
+		printf("\t%s\n", user->uuid);
+	}
+	printf("\n");
+}
+
 cJSON *handle_initial_auth(struct mg_connection *socket) {
 	struct user user = {
 		.user_name = str_cpy("Anonymous"),
@@ -224,18 +318,19 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 	};
 	generate_uuid(user.uuid);
 	//TODO: Persist to database
-	arrput(g_canvas.users, user);
+	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
+	dump_connected_users();
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
 	cJSON *response_array = cJSON_CreateArray();
 	cJSON *response = base_response("authSuccessful");
-	cJSON_AddStringToObject(response, "uuid", user.uuid);
-	cJSON_AddNumberToObject(response, "remainingTiles", user.remaining_tiles);
-	cJSON_AddNumberToObject(response, "level", user.level);
-	cJSON_AddNumberToObject(response, "maxTiles", user.max_tiles);
-	cJSON_AddNumberToObject(response, "tilesToNextLevel", user.tiles_to_next_level);
-	cJSON_AddNumberToObject(response, "levelProgress", user.current_level_progress);
+	cJSON_AddStringToObject(response, "uuid", uptr->uuid);
+	cJSON_AddNumberToObject(response, "remainingTiles", uptr->remaining_tiles);
+	cJSON_AddNumberToObject(response, "level", uptr->level);
+	cJSON_AddNumberToObject(response, "maxTiles", uptr->max_tiles);
+	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
+	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
 	cJSON_InsertItemInArray(response_array, 0, response);
 	return response_array;
 }
@@ -257,8 +352,8 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	memcpy(user.uuid, user_id->valuestring, UUID_STR_LEN);
 	//FIXME: For now, just pretend we know the user and everything is fine.
 	
-	arrput(g_canvas.users, user);
-	struct user *uptr = &g_canvas.users[arrlenu(g_canvas.users) - 1];
+	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
+	dump_connected_users();
 
 	start_user_timer(uptr, socket->mgr);
 
@@ -266,8 +361,6 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
 	// This is how it was in the original, might want to check
 	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
-
-	
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -354,7 +447,7 @@ cJSON *handle_get_colors(const cJSON *user_id) {
 }
 
 cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connection) {
-	const cJSON *command = cJSON_ParseWithLength(cmd, len);
+	cJSON *command = cJSON_ParseWithLength(cmd, len);
 	if (!command) return error_response("No command provided");
 	const cJSON *request_type = cJSON_GetObjectItem(command, "requestType");
 	if (!cJSON_IsString(request_type)) return error_response("No requestType provided");
@@ -365,21 +458,49 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	const cJSON *y = cJSON_GetObjectItem(command, "Y");
 	const cJSON *color_id = cJSON_GetObjectItem(command, "colorID");
 
-	const char *reqstr = request_type->valuestring;
+	char *reqstr = request_type->valuestring;
 
+	cJSON *response = NULL;
 	if (str_eq(reqstr, "initialAuth")) {
-		return handle_initial_auth(connection);
+		response = handle_initial_auth(connection);
 	} else if (str_eq(reqstr, "auth")) {
-		return handle_auth(user_id, connection);
+		response = handle_auth(user_id, connection);
 	} else if (str_eq(reqstr, "getCanvas")) {
-		return handle_get_canvas(user_id);
+		response = handle_get_canvas(user_id);
 	} else if (str_eq(reqstr, "postTile")) {
-		return handle_post_tile(user_id, x, y, color_id);
+		response = handle_post_tile(user_id, x, y, color_id);
 	} else if (str_eq(reqstr, "getColors")) {
-		return handle_get_colors(user_id);
+		response = handle_get_colors(user_id);
+	} else {
+		response = error_response("Unknown requestType");
 	}
 
-	return error_response("Unknown requestType");
+	cJSON_Delete(command);
+	return response;
+}
+
+void dump_client_conns(void) {
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		printf("user %s is_websocket: %s\n", user->uuid, user->socket->is_websocket ? "true" : "false");
+	}
+}
+
+void drop_user_with_connection(struct mg_connection *c) {
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		if (user->socket != c) continue;
+		printf("User %s disconnected.\n", user->uuid);
+		mg_timer_free(&user->tile_increment_timer);
+		free(user->user_name);
+		list_remove(g_canvas.connected_users, {
+			struct user *list_user = (struct user *)arg;
+			return str_eq(list_user->uuid, user->uuid);
+		});
+		break;
+	}
 }
 
 static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
@@ -407,6 +528,8 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 			free(response_str);
 		}
 		cJSON_Delete(response);
+	} else if (event_type == MG_EV_CLOSE) {
+		drop_user_with_connection(c);
 	}
 }
 
@@ -559,6 +682,7 @@ bool load_tiles(struct canvas *c) {
 	sqlite3_finalize(count_query);
 
 	g_canvas.tiles = calloc(g_canvas.edge_length * g_canvas.edge_length, 1);
+	g_canvas.connected_users = LIST_INITIALIZER;
 	printf("Loading %ux%u canvas...\n", c->edge_length, c->edge_length);
 
 	sqlite3_stmt *query;
