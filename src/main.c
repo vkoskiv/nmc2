@@ -132,7 +132,7 @@ void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
 
 struct user {
 	char *user_name;
-	char uuid[UUID_STR_LEN];
+	char uuid[UUID_STR_LEN + 1];
 	struct mg_connection *socket;
 	struct mg_timer tile_increment_timer;
 	bool is_authenticated;
@@ -227,23 +227,27 @@ static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
 
 	user->remaining_tiles++;
+	save_user(user);
+	cJSON *payload_wrapper = cJSON_CreateArray();
 	cJSON *payload = base_response("incrementTileCount");
-	cJSON_AddStringToObject(payload, "amount", "1");
-	send_json(payload, user);
-	cJSON_Delete(payload);
+	cJSON_AddNumberToObject(payload, "amount", 1);
+	cJSON_InsertItemInArray(payload_wrapper, 0, payload);
+	send_json(payload_wrapper, user);
+	cJSON_Delete(payload_wrapper);
 
 	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
 }
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr) {
-	mg_timer_init(&user->tile_increment_timer, user->tile_regen_seconds, MG_TIMER_REPEAT, user_tile_increment_fn, user);
+	printf("Starting timer for %s of %is\n", user->uuid, user->tile_regen_seconds);
+	mg_timer_init(&user->tile_increment_timer, user->tile_regen_seconds * 1000, MG_TIMER_REPEAT, user_tile_increment_fn, user);
 }
 
-void add_user(struct user *user) {
+void add_user(const struct user *user) {
 	sqlite3_stmt *query;
 	const char *sql =
 		"INSERT INTO users (username, uuid, remainingTiles, tileRegenSeconds, totalTilesPlaced, lastConnected, availableColors, level, hasSetUsername, isShadowBanned, maxTiles, tilesToNextLevel, levelProgress)"
-		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+		" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
 		printf("Failed to prepare user insert query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
@@ -273,23 +277,104 @@ void add_user(struct user *user) {
 		sqlite3_close(g_canvas.backing_db);
 		exit(-1);
 	}
+	printf("Inserted user %s\n", user->uuid);
 }
 
-void update_user(struct user *user) {
-	
+void save_user(const struct user *user) {
+	const char *sql = "UPDATE users SET username = ?, remainingTiles = ?, tileRegenSeconds = ?, totalTilesPlaced = ?, lastConnected = ?, level = ?, hasSetUsername = ?, isShadowBanned = ?, maxTiles = ?, tilesToNextLevel = ?, levelProgress = ? WHERE uuid = ?";
+	printf("Saving with remainingTiles: %lu\n", user->remaining_tiles);
+	sqlite3_stmt *query;
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	if (ret != SQLITE_OK) {
+		printf("Failed to prepare user save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	int idx = 1;
+	ret = sqlite3_bind_text(query, idx++, user->user_name, strlen(user->user_name), NULL);
+	ret = sqlite3_bind_int(query, idx++, user->remaining_tiles);
+	ret = sqlite3_bind_int(query, idx++, user->tile_regen_seconds);
+	ret = sqlite3_bind_int(query, idx++, user->total_tiles_placed);
+	ret = sqlite3_bind_int64(query, idx++, user->last_connected_unix);
+	ret = sqlite3_bind_int(query, idx++, user->level);
+	ret = sqlite3_bind_int(query, idx++, str_eq(user->user_name, "Anonymous") ? 1 : 0);
+	ret = sqlite3_bind_int(query, idx++, user->is_shadow_banned);
+	ret = sqlite3_bind_int(query, idx++, user->max_tiles);
+	ret = sqlite3_bind_int(query, idx++, user->tiles_to_next_level);
+	ret = sqlite3_bind_int(query, idx++, user->current_level_progress);
+	ret = sqlite3_bind_text(query, idx++, user->uuid, strlen(user->uuid), NULL);
+
+	ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to update user: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	sqlite3_finalize(query);
+	printf("Saved user %s\n", user->uuid);
 }
 
-bool user_exists(char *uuid) {
+struct user *try_load_user(const char *uuid) {
 	sqlite3_stmt *query;
 	int ret = sqlite3_prepare_v2(g_canvas.backing_db, "SELECT * FROM users WHERE uuid = ?", -1, &query, 0);
-	if (ret != SQLITE_OK) return false;
+	if (ret != SQLITE_OK) return NULL;
 	ret = sqlite3_bind_text(query, 1, uuid, strlen(uuid), NULL);
-	if (ret != SQLITE_OK) return false;
+	if (ret != SQLITE_OK) return NULL;
 	int step = sqlite3_step(query);
-	bool found = false;
-	if (step == SQLITE_ROW) found = true;
+	struct user *user = NULL;
+	if (step == SQLITE_ROW) {
+		size_t i = 1;
+		user = calloc(1, sizeof(*user));
+		const unsigned char *user_name = sqlite3_column_text(query, i++);
+		user->user_name = str_cpy(user_name);
+		const unsigned char *uuid = sqlite3_column_text(query, i++);
+		strncpy(user->uuid, uuid, UUID_STR_LEN);
+		user->remaining_tiles = sqlite3_column_int(query, i++);
+		user->tile_regen_seconds = sqlite3_column_int(query, i++);
+		user->total_tiles_placed = sqlite3_column_int(query, i++);
+		user->last_connected_unix = sqlite3_column_int64(query, i += 2);
+		user->level = sqlite3_column_int(query, i += 2);
+		user->is_shadow_banned = sqlite3_column_int(query, i++);
+		user->max_tiles = sqlite3_column_int(query, i++);
+		user->tiles_to_next_level = sqlite3_column_int(query, i++);
+		user->current_level_progress = sqlite3_column_int(query, i++);
+	}
 	sqlite3_finalize(query);
-	return found;
+	return user;
+}
+
+struct user *check_and_fetch_user(const char *uuid) {
+	struct list_elem *head = NULL;
+	list_foreach(head, g_canvas.connected_users) {
+		struct user *user = (struct user *)head->thing;
+		if (str_eq(user->uuid, uuid)) return user;
+	}
+	return NULL;
+}
+
+void level_up(struct user *user) {
+	user->level++;
+	user->max_tiles += 100;
+	user->tiles_to_next_level += 150;
+	user->current_level_progress = 0;
+	user->remaining_tiles = user->max_tiles;
+	if (user->tile_regen_seconds > 10) {
+		user->tile_regen_seconds--;
+	}
+
+	//Tell the client the good news :^)
+	cJSON *payload_array = cJSON_CreateArray();
+	cJSON *response = base_response("levelUp");
+	cJSON_AddNumberToObject(response, "level", user->level);
+	cJSON_AddNumberToObject(response, "maxTiles", user->max_tiles);
+	cJSON_AddNumberToObject(response, "tilesToNextLevel", user->tiles_to_next_level);
+	cJSON_AddNumberToObject(response, "levelProgress", user->current_level_progress);
+	cJSON_AddNumberToObject(response, "remainingTiles", user->remaining_tiles);
+	cJSON_InsertItemInArray(payload_array, 0, response);
+	send_json(payload_array, user);
+	cJSON_Delete(payload_array);
 }
 
 void dump_connected_users(void) {
@@ -317,9 +402,12 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 		.last_connected_unix = 0,
 	};
 	generate_uuid(user.uuid);
-	//TODO: Persist to database
+	//FIXME: Do rate limiting
 	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
+	add_user(uptr);
 	dump_connected_users();
+
+	start_user_timer(uptr, socket->mgr);
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -336,24 +424,19 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 }
 
 cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
-	struct user user = {
-		.user_name = str_cpy("Anonymous"),
-		.socket = socket,
-		.is_authenticated = true,
-		.remaining_tiles = 60,
-		.max_tiles = 250,
-		.tile_regen_seconds = 10,
-		.total_tiles_placed = 0,
-		.tiles_to_next_level = 100,
-		.current_level_progress = 0,
-		.level = 1,
-		.last_connected_unix = 0,
-	};
-	memcpy(user.uuid, user_id->valuestring, UUID_STR_LEN);
-	//FIXME: For now, just pretend we know the user and everything is fine.
-	
-	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
+	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
+	if (strlen(user_id->valuestring) > UUID_STR_LEN) return error_response("Invalid userID");
+
+	//FIXME: Awkward copy & free
+	struct user *user = try_load_user(user_id->valuestring);
+	if (!user) return error_response("Invalid userID");
+	struct user *uptr = list_append(g_canvas.connected_users, *user)->thing;
+	free(user);
 	dump_connected_users();
+	uptr->socket = socket;
+
+	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
+	uptr->is_authenticated = true;
 
 	start_user_timer(uptr, socket->mgr);
 
@@ -362,15 +445,17 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	// This is how it was in the original, might want to check
 	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
 
+	save_user(uptr);
+
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
 	cJSON *response_array = cJSON_CreateArray();
 	cJSON *response = base_response("reAuthSuccessful");
-	cJSON_AddNumberToObject(response, "remainingTiles", user.remaining_tiles);
-	cJSON_AddNumberToObject(response, "level", user.level);
-	cJSON_AddNumberToObject(response, "maxTiles", user.max_tiles);
-	cJSON_AddNumberToObject(response, "tilesToNextLevel", user.tiles_to_next_level);
-	cJSON_AddNumberToObject(response, "levelProgress", user.current_level_progress);
+	cJSON_AddNumberToObject(response, "remainingTiles", uptr->remaining_tiles);
+	cJSON_AddNumberToObject(response, "level", uptr->level);
+	cJSON_AddNumberToObject(response, "maxTiles", uptr->max_tiles);
+	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
+	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
 	cJSON_InsertItemInArray(response_array, 0, response);
 	return response_array;
 }
@@ -414,7 +499,19 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
 	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
-	//TODO: Validate user_id and other params
+	
+	struct user *user = check_and_fetch_user(user_id->valuestring);
+	if (!user) return error_response("Invalid userID");
+	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
+	
+	user->remaining_tiles--;
+	user->total_tiles_placed++;
+	user->current_level_progress++;
+	if (user->current_level_progress >= user->tiles_to_next_level) {
+		level_up(user);
+	}
+	save_user(user);
+
 	g_canvas.tiles[x + y * g_canvas.edge_length] = color_id;
 	cJSON *update = new_tile_update(x, y, color_id);
 	broadcast(update);
@@ -483,7 +580,7 @@ void dump_client_conns(void) {
 	struct list_elem *elem = NULL;
 	list_foreach(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
-		printf("user %s is_websocket: %s\n", user->uuid, user->socket->is_websocket ? "true" : "false");
+		printf("\t%s\n", user->uuid);
 	}
 }
 
@@ -491,8 +588,9 @@ void drop_user_with_connection(struct mg_connection *c) {
 	struct list_elem *elem = NULL;
 	list_foreach(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
+		printf("%p\n", (void*)c);
 		if (user->socket != c) continue;
-		printf("User %s disconnected.\n", user->uuid);
+		printf("!!!!! User %s disconnected.\n", user->uuid);
 		mg_timer_free(&user->tile_increment_timer);
 		free(user->user_name);
 		list_remove(g_canvas.connected_users, {
@@ -557,9 +655,11 @@ void ensure_tiles_table(sqlite3 *db) {
 	int ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
 		printf("Failed to create tiles table\n");
+		sqlite3_finalize(query);
 		sqlite3_close(db);
 		exit(-1);
 	}
+	sqlite3_finalize(query);
 	// Next, ensure we've got tiles in there.
 	sqlite3_stmt *count;
 	ret = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tiles", -1, &count, NULL);
@@ -577,6 +677,7 @@ void ensure_tiles_table(sqlite3 *db) {
 		exit(-1);
 	}
 	size_t rows = sqlite3_column_int(count, 0);
+	sqlite3_finalize(count);
 
 	sqlite3_stmt *bt;
 	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
@@ -589,42 +690,44 @@ void ensure_tiles_table(sqlite3 *db) {
 	}
 	sqlite3_finalize(bt);
 
-	if (rows == 0) {
-		printf("%u Running initial tile db init...\n", (unsigned)time(NULL));
-		sqlite3_stmt *insert;
-		
-		for (size_t y = 0; y < NEW_DB_CANVAS_SIZE; ++y) {
-			for (size_t x = 0; x < NEW_DB_CANVAS_SIZE; ++x) {
-				ret = sqlite3_prepare_v2(db, "INSERT INTO tiles (X, Y, colorID, lastModifier, placeTime) VALUES (?, ?, 3, \"\", 0)", -1, &insert, NULL);
-				if (ret != SQLITE_OK) printf("Failed to prepare tile insert: %s\n", sqlite3_errmsg(db));
-				ret = sqlite3_bind_int(insert, 1, x);
-				if (ret != SQLITE_OK) printf("Failed to bind x: %s\n", sqlite3_errmsg(db));
-				ret = sqlite3_bind_int(insert, 2, y);
-				if (ret != SQLITE_OK) printf("Failed to bind y: %s\n", sqlite3_errmsg(db));
-				int res = sqlite3_step(insert);
-				if (res != SQLITE_DONE) {
-					printf("Failed to insert for x = %lu, y = %lu\n", x, y);
-					sqlite3_finalize(insert);
-					sqlite3_close(db);
-					exit(-1);
-				}
+	if (rows > 0) return;
+
+	printf("%u Running initial tile db init...\n", (unsigned)time(NULL));
+	sqlite3_stmt *insert;
+	ret = sqlite3_prepare_v2(db, "INSERT INTO tiles (X, Y, colorID, lastModifier, placeTime) VALUES (?, ?, 3, \"\", 0)", -1, &insert, NULL);
+	if (ret != SQLITE_OK) printf("Failed to prepare tile insert: %s\n", sqlite3_errmsg(db));
+
+	for (size_t y = 0; y < NEW_DB_CANVAS_SIZE; ++y) {
+		for (size_t x = 0; x < NEW_DB_CANVAS_SIZE; ++x) {
+			ret = sqlite3_bind_int(insert, 1, x);
+			if (ret != SQLITE_OK) printf("Failed to bind x: %s\n", sqlite3_errmsg(db));
+			ret = sqlite3_bind_int(insert, 2, y);
+			if (ret != SQLITE_OK) printf("Failed to bind y: %s\n", sqlite3_errmsg(db));
+			int res = sqlite3_step(insert);
+			if (res != SQLITE_DONE) {
+				printf("Failed to insert for x = %lu, y = %lu\n", x, y);
 				sqlite3_finalize(insert);
+				sqlite3_close(db);
+				exit(-1);
 			}
+			sqlite3_clear_bindings(insert);
+			sqlite3_reset(insert);
 		}
-
-		sqlite3_stmt *et;
-		sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
-		ret = sqlite3_step(et);
-		if (ret != SQLITE_DONE) {
-			printf("Failed to commit transaction\n");
-			sqlite3_finalize(et);
-			sqlite3_close(db);
-			exit(-1);
-		}
-		sqlite3_finalize(et);
-
-		printf("%u db init done.\n", (unsigned)time(NULL));
 	}
+	sqlite3_finalize(insert);
+
+	sqlite3_stmt *et;
+	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
+	ret = sqlite3_step(et);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to commit transaction\n");
+		sqlite3_finalize(et);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	sqlite3_finalize(et);
+
+	printf("%u db init done.\n", (unsigned)time(NULL));
 }
 
 void ensure_users_table(sqlite3 *db) {
@@ -689,8 +792,6 @@ bool load_tiles(struct canvas *c) {
 	sqlite3_prepare_v2(c->backing_db, "select * from tiles", -1, &query, NULL);
 
 	while (sqlite3_step(query) != SQLITE_DONE) {
-		size_t columns = sqlite3_column_count(query);
-		
 		size_t x = sqlite3_column_int(query, 1);
 		size_t y = sqlite3_column_int(query, 2);
 		size_t id = sqlite3_column_int(query, 3);
@@ -706,7 +807,8 @@ bool load_tiles(struct canvas *c) {
 bool set_up_db(struct canvas *c) {
 	int ret = 0;
 	//ret = sqlite3_open("pikselit2022.db", &c->backing_db);
-	ret = sqlite3_open(":memory:", &c->backing_db);
+	//ret = sqlite3_open(":memory:", &c->backing_db);
+	ret = sqlite3_open("asdf.db", &c->backing_db);
 	if (ret != SQLITE_OK) {
 		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_close(c->backing_db);
