@@ -262,7 +262,7 @@ void save_user(const struct user *user) {
 static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
 
-	user->remaining_tiles++;
+	if (user->remaining_tiles < user->max_tiles) user->remaining_tiles++;
 	save_user(user);
 	cJSON *payload_wrapper = cJSON_CreateArray();
 	cJSON *payload = base_response("incrementTileCount");
