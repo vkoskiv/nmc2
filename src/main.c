@@ -714,6 +714,8 @@ void ensure_tiles_table(sqlite3 *db) {
 	size_t rows = sqlite3_column_int(count, 0);
 	sqlite3_finalize(count);
 
+	if (rows > 0) return;
+
 	sqlite3_stmt *bt;
 	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
 	ret = sqlite3_step(bt);
@@ -724,8 +726,6 @@ void ensure_tiles_table(sqlite3 *db) {
 		exit(-1);
 	}
 	sqlite3_finalize(bt);
-
-	if (rows > 0) return;
 
 	printf("%u Running initial tile db init...\n", (unsigned)time(NULL));
 	sqlite3_stmt *insert;
