@@ -223,6 +223,42 @@ cJSON *error_response(char *error_message) {
 	return error;
 }
 
+void save_user(const struct user *user) {
+	const char *sql = "UPDATE users SET username = ?, remainingTiles = ?, tileRegenSeconds = ?, totalTilesPlaced = ?, lastConnected = ?, level = ?, hasSetUsername = ?, isShadowBanned = ?, maxTiles = ?, tilesToNextLevel = ?, levelProgress = ? WHERE uuid = ?";
+	printf("Saving with remainingTiles: %u\n", user->remaining_tiles);
+	sqlite3_stmt *query;
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	if (ret != SQLITE_OK) {
+		printf("Failed to prepare user save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	int idx = 1;
+	ret = sqlite3_bind_text(query, idx++, user->user_name, strlen(user->user_name), NULL);
+	ret = sqlite3_bind_int(query, idx++, user->remaining_tiles);
+	ret = sqlite3_bind_int(query, idx++, user->tile_regen_seconds);
+	ret = sqlite3_bind_int(query, idx++, user->total_tiles_placed);
+	ret = sqlite3_bind_int64(query, idx++, user->last_connected_unix);
+	ret = sqlite3_bind_int(query, idx++, user->level);
+	ret = sqlite3_bind_int(query, idx++, str_eq(user->user_name, "Anonymous") ? 1 : 0);
+	ret = sqlite3_bind_int(query, idx++, user->is_shadow_banned);
+	ret = sqlite3_bind_int(query, idx++, user->max_tiles);
+	ret = sqlite3_bind_int(query, idx++, user->tiles_to_next_level);
+	ret = sqlite3_bind_int(query, idx++, user->current_level_progress);
+	ret = sqlite3_bind_text(query, idx++, user->uuid, strlen(user->uuid), NULL);
+
+	ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to update user: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	sqlite3_finalize(query);
+	printf("Saved user %s\n", user->uuid);
+}
+
 static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
 
@@ -278,42 +314,6 @@ void add_user(const struct user *user) {
 		exit(-1);
 	}
 	printf("Inserted user %s\n", user->uuid);
-}
-
-void save_user(const struct user *user) {
-	const char *sql = "UPDATE users SET username = ?, remainingTiles = ?, tileRegenSeconds = ?, totalTilesPlaced = ?, lastConnected = ?, level = ?, hasSetUsername = ?, isShadowBanned = ?, maxTiles = ?, tilesToNextLevel = ?, levelProgress = ? WHERE uuid = ?";
-	printf("Saving with remainingTiles: %lu\n", user->remaining_tiles);
-	sqlite3_stmt *query;
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
-	if (ret != SQLITE_OK) {
-		printf("Failed to prepare user save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
-		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
-		exit(-1);
-	}
-	int idx = 1;
-	ret = sqlite3_bind_text(query, idx++, user->user_name, strlen(user->user_name), NULL);
-	ret = sqlite3_bind_int(query, idx++, user->remaining_tiles);
-	ret = sqlite3_bind_int(query, idx++, user->tile_regen_seconds);
-	ret = sqlite3_bind_int(query, idx++, user->total_tiles_placed);
-	ret = sqlite3_bind_int64(query, idx++, user->last_connected_unix);
-	ret = sqlite3_bind_int(query, idx++, user->level);
-	ret = sqlite3_bind_int(query, idx++, str_eq(user->user_name, "Anonymous") ? 1 : 0);
-	ret = sqlite3_bind_int(query, idx++, user->is_shadow_banned);
-	ret = sqlite3_bind_int(query, idx++, user->max_tiles);
-	ret = sqlite3_bind_int(query, idx++, user->tiles_to_next_level);
-	ret = sqlite3_bind_int(query, idx++, user->current_level_progress);
-	ret = sqlite3_bind_text(query, idx++, user->uuid, strlen(user->uuid), NULL);
-
-	ret = sqlite3_step(query);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to update user: %s\n", sqlite3_errmsg(g_canvas.backing_db));
-		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
-		exit(-1);
-	}
-	sqlite3_finalize(query);
-	printf("Saved user %s\n", user->uuid);
 }
 
 struct user *try_load_user(const char *uuid) {
@@ -482,6 +482,40 @@ cJSON *new_tile_update(size_t x, size_t y, size_t color_id) {
 	return payload_array;
 }
 
+void persist_tile_state(size_t x, size_t y, size_t color_id, const char *placer) {
+	const char *sql = "UPDATE tiles SET colorID = ?, lastModifier = ?, placeTime = ? WHERE X = ? AND Y = ?";
+	if (!sqlite3_get_autocommit(g_canvas.backing_db)) {
+		printf("HOX! Not in autocommit mode!\n");
+	}
+	printf("Persisting %lu, %lu, id %lu\n", x, y, color_id);
+	sqlite3_stmt *query;
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, NULL);
+	if (ret != SQLITE_OK) {
+		printf("Failed to prepare tile save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	int idx = 1;
+	ret = sqlite3_bind_int(query, idx++, color_id);
+	ret = sqlite3_bind_text(query, idx++, placer, strlen(placer), NULL);
+	ret = sqlite3_bind_int(query, idx++, (unsigned)time(NULL));
+	ret = sqlite3_bind_int(query, idx++, x);
+	ret = sqlite3_bind_int(query, idx++, y);
+	
+	printf("expanded: %s\n", sqlite3_expanded_sql(query));
+	
+	ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to persist tile: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	sqlite3_finalize(query);
+	printf("Persisted tile, affected %i rows.\n", sqlite3_changes(g_canvas.backing_db));
+}
+
 cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param, const cJSON *color_id_param) {
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
@@ -513,6 +547,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	save_user(user);
 
 	g_canvas.tiles[x + y * g_canvas.edge_length] = color_id;
+	persist_tile_state(x, y, color_id, user->uuid);
 	cJSON *update = new_tile_update(x, y, color_id);
 	broadcast(update);
 	cJSON_Delete(update);
