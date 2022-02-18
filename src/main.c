@@ -279,6 +279,15 @@ void start_user_timer(struct user *user, struct mg_mgr *mgr) {
 	mg_timer_init(&user->tile_increment_timer, user->tile_regen_seconds * 1000, MG_TIMER_REPEAT, user_tile_increment_fn, user);
 }
 
+void send_user_count(void) {
+	cJSON *payload_wrapper = cJSON_CreateArray();
+	cJSON *payload = base_response("userCount");
+	cJSON_AddNumberToObject(payload, "count", list_elems(&g_canvas.connected_users));
+	cJSON_InsertItemInArray(payload_wrapper, 0, payload);
+	broadcast(payload_wrapper);
+	cJSON_Delete(payload_wrapper);
+}
+
 void add_user(const struct user *user) {
 	sqlite3_stmt *query;
 	const char *sql =
@@ -408,6 +417,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 	dump_connected_users();
 
 	start_user_timer(uptr, socket->mgr);
+	send_user_count();
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -439,6 +449,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	uptr->is_authenticated = true;
 
 	start_user_timer(uptr, socket->mgr);
+	send_user_count();
 
 	size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
 	size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
