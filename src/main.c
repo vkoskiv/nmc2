@@ -126,7 +126,7 @@ void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
 	_list_remove(&list, check_##item)
 
 #define list_append(list, thing) _list_append(&list, &thing, sizeof(thing))
-#define list_foreach(element, list) for (element = list.first; element; element = element->next)
+#define list_foreach(element, list) for (element = list.first; list.first && element; element = element->next)
 
 // end linked list
 
