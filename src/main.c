@@ -17,6 +17,7 @@ struct color {
 	uint16_t color_id;
 };
 
+void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 
 // We default to the canvas size found in an existing db.
 // If the db is new, we fall back to this value and create
@@ -46,8 +47,6 @@ static struct color g_color_list[] = {
 };
 
 #define COLOR_AMOUNT (sizeof(g_color_list) / sizeof(struct color))
-
-void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 
 // q&d linked list
 
@@ -156,6 +155,10 @@ struct user {
 	struct mg_timer tile_increment_timer;
 	bool is_authenticated;
 	bool is_shadow_banned;
+
+	// Rate limiting
+	struct timeval last_tile_place;
+	float allowance;
 	
 	uint32_t remaining_tiles;
 	uint32_t max_tiles;
@@ -181,6 +184,55 @@ struct canvas {
 	struct mg_timer ws_ping_timer;
 	sqlite3 *backing_db; // For persistence
 };
+
+// rate limiting
+
+// We start ignoring tile placements if we get more than MAX_RATE per PER_SECONDS
+#define MAX_RATE 7
+#define PER_SECONDS 1
+
+// We will accept this many initialAuth requests per ip per hour
+#define MAX_ACCOUNTS_PER_HOUR 10
+
+// And also cap the total limit for a given IP
+#define MAX_USERS_PER_IP 64
+
+struct remote_host {
+	struct mg_addr addr;
+	size_t total_accounts;
+
+};
+
+long get_ms_delta(struct timeval timer) {
+	struct timeval tmr2;
+	gettimeofday(&tmr2, NULL);
+	return 1000 * (tmr2.tv_sec - timer.tv_sec) + ((tmr2.tv_usec - timer.tv_usec) / 1000);
+}
+
+bool is_within_rate_limit(struct user *user) {
+	bool is_within_limit = true;
+	long ms_since_last_tile = get_ms_delta(user->last_tile_place);
+	gettimeofday(&user->last_tile_place, NULL);
+	float secs_since_last = (float)ms_since_last_tile / 1000.0f;
+	logr("debug: last tile place was %fs ago.\n", secs_since_last);
+	
+	user->allowance += secs_since_last * ((float)MAX_RATE / (float)PER_SECONDS);
+	if (user->allowance > (float)MAX_RATE) {
+		// Throttled
+		user->allowance = (float)MAX_RATE;
+	}
+	if (user->allowance < 1.0f) {
+		is_within_limit = false;
+	} else {
+		user->allowance -= 1.0f;
+	}
+
+	if (!is_within_limit) logr("!!!!!! Rejecting tile place!\n");
+	// Finally, update the new last tile place time here
+	return is_within_limit;
+}
+
+// end rate limiting
 
 // timing
 
@@ -433,6 +485,12 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
 	add_user(uptr);
 	dump_connected_users();
+	uptr->socket = socket;
+
+	// Set up rate limiting
+	// FIXME: Save to db and load to prevent resetting allowance by re-authing
+	gettimeofday(&uptr->last_tile_place, NULL);
+	uptr->allowance = (float)MAX_RATE;
 
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
@@ -462,6 +520,11 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	free(user);
 	dump_connected_users();
 	uptr->socket = socket;
+
+	// Set up rate limiting
+	// FIXME: Save to db and load to prevent resetting allowance by re-authing
+	gettimeofday(&uptr->last_tile_place, NULL);
+	uptr->allowance = (float)MAX_RATE;
 
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
@@ -562,6 +625,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 	if (!user) return error_response("Invalid userID");
 	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
+	if (!is_within_rate_limit(user)) return error_response("Rate limit exceeded");
 	
 	user->remaining_tiles--;
 	user->total_tiles_placed++;
