@@ -47,6 +47,8 @@ static struct color g_color_list[] = {
 
 #define COLOR_AMOUNT (sizeof(g_color_list) / sizeof(struct color))
 
+void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
+
 // q&d linked list
 
 struct list_elem {
@@ -180,7 +182,6 @@ static struct canvas g_canvas;
 static bool g_running = true;
 
 static const char *s_listen_on = "ws://0.0.0.0:3001";
-static const char *s_web_root = ".";
 
 void generate_uuid(char *buf) {
 	if (!buf) return;
@@ -230,7 +231,6 @@ cJSON *error_response(char *error_message) {
 
 void save_user(const struct user *user) {
 	const char *sql = "UPDATE users SET username = ?, remainingTiles = ?, tileRegenSeconds = ?, totalTilesPlaced = ?, lastConnected = ?, level = ?, hasSetUsername = ?, isShadowBanned = ?, maxTiles = ?, tilesToNextLevel = ?, levelProgress = ? WHERE uuid = ?";
-	printf("Saving with remainingTiles: %u\n", user->remaining_tiles);
 	sqlite3_stmt *query;
 	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
@@ -261,7 +261,6 @@ void save_user(const struct user *user) {
 		exit(-1);
 	}
 	sqlite3_finalize(query);
-	printf("Saved user %s\n", user->uuid);
 }
 
 static void user_tile_increment_fn(void *arg) {
@@ -280,7 +279,7 @@ static void user_tile_increment_fn(void *arg) {
 }
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr) {
-	printf("Starting timer for %s of %is\n", user->uuid, user->tile_regen_seconds);
+	(void)mgr; // Probably not needed
 	mg_timer_init(&user->tile_increment_timer, user->tile_regen_seconds * 1000, MG_TIMER_REPEAT, user_tile_increment_fn, user);
 }
 
@@ -503,7 +502,6 @@ void persist_tile_state(size_t x, size_t y, size_t color_id, const char *placer)
 	if (!sqlite3_get_autocommit(g_canvas.backing_db)) {
 		printf("HOX! Not in autocommit mode!\n");
 	}
-	printf("Persisting %lu, %lu, id %lu\n", x, y, color_id);
 	sqlite3_stmt *query;
 	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, NULL);
 	if (ret != SQLITE_OK) {
@@ -519,8 +517,6 @@ void persist_tile_state(size_t x, size_t y, size_t color_id, const char *placer)
 	ret = sqlite3_bind_int(query, idx++, x);
 	ret = sqlite3_bind_int(query, idx++, y);
 	
-	printf("expanded: %s\n", sqlite3_expanded_sql(query));
-	
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
 		printf("Failed to persist tile: %s\n", sqlite3_errmsg(g_canvas.backing_db));
@@ -529,7 +525,6 @@ void persist_tile_state(size_t x, size_t y, size_t color_id, const char *placer)
 		exit(-1);
 	}
 	sqlite3_finalize(query);
-	printf("Persisted tile, affected %i rows.\n", sqlite3_changes(g_canvas.backing_db));
 }
 
 cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param, const cJSON *color_id_param) {
@@ -595,11 +590,12 @@ cJSON *handle_get_colors(const cJSON *user_id) {
 }
 
 cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connection) {
+	// cmd is not necessarily null-terminated. Trust len.
 	cJSON *command = cJSON_ParseWithLength(cmd, len);
 	if (!command) return error_response("No command provided");
 	const cJSON *request_type = cJSON_GetObjectItem(command, "requestType");
 	if (!cJSON_IsString(request_type)) return error_response("No requestType provided");
-	printf("%d Received request: %s\n", (unsigned)time(NULL), cmd);
+	logr("Received request: %.*s\n", (int)len, cmd);
 	
 	const cJSON *user_id = cJSON_GetObjectItem(command, "userID");
 	const cJSON *x = cJSON_GetObjectItem(command, "X");
@@ -881,6 +877,21 @@ void sigint_handler(int sig) {
 	if (sig == 2) {
 		printf("Received SIGINT, stopping.\n");
 		g_running = false;
+	}
+}
+
+void logr(const char *fmt, ...) {
+	if (!fmt) return;
+	printf("%u ", (unsigned)time(NULL));
+	char buf[512];
+	int ret = 0;
+	va_list vl;
+	va_start(vl, fmt);
+	ret += vsnprintf(buf, sizeof(buf), fmt, vl);
+	va_end(vl);
+	printf("%s", buf);
+	if (ret > 512) {
+		printf("...\n");
 	}
 }
 
