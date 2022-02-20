@@ -649,17 +649,20 @@ void drop_user_with_connection(struct mg_connection *c) {
 	struct list_elem *elem = NULL;
 	list_foreach(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
-		printf("%p\n", (void*)c);
 		if (user->socket != c) continue;
-		printf("!!!!! User %s disconnected.\n", user->uuid);
+		printf("User %s disconnected.\n", user->uuid);
+		user->last_connected_unix = (unsigned)time(NULL);
+		save_user(user);
 		mg_timer_free(&user->tile_increment_timer);
 		free(user->user_name);
 		list_remove(g_canvas.connected_users, {
-			struct user *list_user = (struct user *)arg;
+			const struct user *list_user = (struct user *)arg;
 			return str_eq(list_user->uuid, user->uuid);
 		});
 		break;
 	}
+	send_user_count();
+	dump_client_conns();
 }
 
 static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
