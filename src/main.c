@@ -657,7 +657,7 @@ void drop_user_with_connection(struct mg_connection *c) {
 		free(user->user_name);
 		list_remove(g_canvas.connected_users, {
 			const struct user *list_user = (struct user *)arg;
-			return str_eq(list_user->uuid, user->uuid);
+			return list_user->socket == user->socket;
 		});
 		break;
 	}
