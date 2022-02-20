@@ -340,15 +340,17 @@ struct user *try_load_user(const char *uuid) {
 	if (step == SQLITE_ROW) {
 		size_t i = 1;
 		user = calloc(1, sizeof(*user));
-		const unsigned char *user_name = sqlite3_column_text(query, i++);
+		const char *user_name = (const char *)sqlite3_column_text(query, i++);
 		user->user_name = str_cpy(user_name);
-		const unsigned char *uuid = sqlite3_column_text(query, i++);
+		const char *uuid = (const char *)sqlite3_column_text(query, i++);
 		strncpy(user->uuid, uuid, UUID_STR_LEN);
 		user->remaining_tiles = sqlite3_column_int(query, i++);
 		user->tile_regen_seconds = sqlite3_column_int(query, i++);
 		user->total_tiles_placed = sqlite3_column_int(query, i++);
-		user->last_connected_unix = sqlite3_column_int64(query, i += 2);
-		user->level = sqlite3_column_int(query, i += 2);
+		user->last_connected_unix = sqlite3_column_int64(query, i);
+		i += 2;
+		user->level = sqlite3_column_int(query, i);
+		i += 2;
 		user->is_shadow_banned = sqlite3_column_int(query, i++);
 		user->max_tiles = sqlite3_column_int(query, i++);
 		user->tiles_to_next_level = sqlite3_column_int(query, i++);
