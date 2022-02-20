@@ -121,9 +121,14 @@ void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
 	}
 }
 
-#define list_remove(list, ...) \
-	bool check_##item(void *arg) __VA_ARGS__\
-	_list_remove(&list, check_##item)
+#define CONCAT_INTERNAL(x, y) x##y
+#define CONCAT(x, y) CONCAT_INTERNAL(x, y)
+
+#define list_remove_internal(list, funcname, ...) \
+	bool funcname(void *arg) __VA_ARGS__\
+	_list_remove(&list, funcname)
+
+#define list_remove(list, ...) list_remove_internal(list, CONCAT(check_, __COUNTER__), __VA_ARGS__)
 
 #define list_append(list, thing) _list_append(&list, &thing, sizeof(thing))
 #define list_foreach(element, list) for (element = list.first; list.first && element; element = element->next)
