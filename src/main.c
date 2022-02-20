@@ -879,6 +879,9 @@ void sigint_handler(int sig) {
 	if (sig == 2) {
 		printf("Received SIGINT, stopping.\n");
 		g_running = false;
+	} else if (sig == 15) {
+		printf("Received SIGTERM, stopping.\n");
+		g_running = false;
 	}
 }
 
@@ -900,6 +903,10 @@ void logr(const char *fmt, ...) {
 int main(void) {
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
 		printf("Failed to register sigint handler\n");
+		return -1;
+	}
+	if (signal(SIGTERM, sigint_handler) == SIG_ERR) {
+		printf("Failed to register sigterm handler\n");
 		return -1;
 	}
 	printf("Using SQLite v%s\n", sqlite3_libversion());
