@@ -70,6 +70,18 @@ struct list_elem *_list_find_head(struct list *list) {
 	return head;
 }
 
+void elem_destroy(struct list_elem *elem) {
+	if (elem->next) elem_destroy(elem->next);
+	if (elem->thing) free(elem->thing);
+	free(elem);
+}
+
+void list_destroy(struct list list) {
+	if (!list.first) return;
+	struct list_elem *head = list.first;
+	if (head) elem_destroy(head);
+}
+
 bool list_empty(struct list *list) {
 	return !_list_find_head(list);
 }
@@ -924,6 +936,12 @@ int main(void) {
 	printf("Closing db\n");
 	mg_mgr_free(&mgr);
 	free(g_canvas.tiles);
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = elem->thing;
+		free(user->user_name);
+	}
+	list_destroy(g_canvas.connected_users);
 	sqlite3_close(g_canvas.backing_db);
 	return 0;
 }
