@@ -265,8 +265,10 @@ void save_user(const struct user *user) {
 
 static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
-
-	if (user->remaining_tiles < user->max_tiles) user->remaining_tiles++;
+	// tile_regen_seconds may change in level_up(), so keep it updated here.
+	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
+	if (user->remaining_tiles == user->max_tiles) return;
+	user->remaining_tiles++;
 	save_user(user);
 	cJSON *payload_wrapper = cJSON_CreateArray();
 	cJSON *payload = base_response("incrementTileCount");
@@ -274,8 +276,6 @@ static void user_tile_increment_fn(void *arg) {
 	cJSON_InsertItemInArray(payload_wrapper, 0, payload);
 	send_json(payload_wrapper, user);
 	cJSON_Delete(payload_wrapper);
-
-	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
 }
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr) {
