@@ -209,6 +209,9 @@ long get_ms_delta(struct timeval timer) {
 	return 1000 * (tmr2.tv_sec - timer.tv_sec) + ((tmr2.tv_usec - timer.tv_usec) / 1000);
 }
 
+// 'Token bucket' algorithm
+// This particular implementation is adapted from this SO answer:
+// https://stackoverflow.com/a/668327
 bool is_within_rate_limit(struct user *user) {
 	bool is_within_limit = true;
 	long ms_since_last_tile = get_ms_delta(user->last_tile_place);
