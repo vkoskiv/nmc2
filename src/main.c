@@ -230,7 +230,6 @@ bool is_within_rate_limit(struct user *user) {
 		user->allowance -= 1.0f;
 	}
 
-	if (!is_within_limit) logr("!!!!!! Rejecting tile place!\n");
 	// Finally, update the new last tile place time here
 	return is_within_limit;
 }
@@ -628,7 +627,10 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 	if (!user) return error_response("Invalid userID");
 	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
-	if (!is_within_rate_limit(user)) return error_response("Rate limit exceeded");
+	if (!is_within_rate_limit(user)) {
+		logr("Dropping tile place from %s\n", user->uuid);
+		return error_response("Rate limit exceeded");
+	}
 	
 	user->remaining_tiles--;
 	user->total_tiles_placed++;
