@@ -19,10 +19,24 @@ struct color {
 
 void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 
+// config
+
 // We default to the canvas size found in an existing db.
 // If the db is new, we fall back to this value and create
 // it based on that.
 #define NEW_DB_CANVAS_SIZE 512
+
+// We start ignoring tile placements if we get more than MAX_RATE per PER_SECONDS
+#define MAX_RATE 5
+#define PER_SECONDS 1
+
+// We will accept this many initialAuth requests per ip per hour
+#define MAX_ACCOUNTS_PER_HOUR 10
+
+// And also cap the total amount of user IDs for a given IP
+#define MAX_USERS_PER_IP 64
+
+// end config
 
 // These come from the original implementation here:
 // https://github.com/vkoskiv/NoMansCanvas
@@ -186,16 +200,6 @@ struct canvas {
 };
 
 // rate limiting
-
-// We start ignoring tile placements if we get more than MAX_RATE per PER_SECONDS
-#define MAX_RATE 7
-#define PER_SECONDS 1
-
-// We will accept this many initialAuth requests per ip per hour
-#define MAX_ACCOUNTS_PER_HOUR 10
-
-// And also cap the total limit for a given IP
-#define MAX_USERS_PER_IP 64
 
 struct remote_host {
 	struct mg_addr addr;
