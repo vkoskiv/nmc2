@@ -473,12 +473,11 @@ void level_up(struct user *user) {
 
 void dump_connected_users(void) {
 	struct list_elem *head = NULL;
-	printf("Connected users:\n");
+	size_t users = 0;
 	list_foreach(head, g_canvas.connected_users) {
-		struct user *user = (struct user *)head->thing;
-		printf("\t%s\n", user->uuid);
+		users++;
 	}
-	printf("\n");
+	printf("Connected users: %lu\n", users);
 }
 
 cJSON *handle_initial_auth(struct mg_connection *socket) {
@@ -724,14 +723,6 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	return response;
 }
 
-void dump_client_conns(void) {
-	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
-		struct user *user = (struct user *)elem->thing;
-		printf("\t%s\n", user->uuid);
-	}
-}
-
 void drop_user_with_connection(struct mg_connection *c) {
 	struct list_elem *elem = NULL;
 	list_foreach(elem, g_canvas.connected_users) {
@@ -749,7 +740,7 @@ void drop_user_with_connection(struct mg_connection *c) {
 		break;
 	}
 	send_user_count();
-	dump_client_conns();
+	dump_connected_users();
 }
 
 static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
