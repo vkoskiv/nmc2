@@ -533,6 +533,9 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	struct user *user = user_for_connection(socket);
 	if (user) return error_response("Already authenticated");
 
+	bool session_running = false;
+	if (check_and_fetch_user(user_id->valuestring)) session_running = true;
+
 	user = try_load_user(user_id->valuestring);
 	if (!user) return error_response("Invalid userID");
 	struct user *uptr = list_append(g_canvas.connected_users, *user)->thing;
@@ -551,10 +554,12 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
-	size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
-	size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
-	// This is how it was in the original, might want to check
-	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
+	if (!session_running) {
+		size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
+		size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
+		// This is how it was in the original, might want to check
+		uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
+	}
 
 	save_user(uptr);
 
