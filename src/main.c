@@ -430,6 +430,15 @@ struct user *try_load_user(const char *uuid) {
 	return user;
 }
 
+struct user *user_for_connection(struct mg_connection *c) {
+	struct list_elem *head = NULL;
+	list_foreach(head, g_canvas.connected_users) {
+		struct user *user = (struct user *)head->thing;
+		if (user->socket == c) return user;
+	}
+	return NULL;
+}
+
 struct user *check_and_fetch_user(const char *uuid) {
 	struct list_elem *head = NULL;
 	list_foreach(head, g_canvas.connected_users) {
@@ -520,7 +529,12 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	if (strlen(user_id->valuestring) > UUID_STR_LEN) return error_response("Invalid userID");
 
 	//FIXME: Awkward copy & free
-	struct user *user = try_load_user(user_id->valuestring);
+
+	// Verify we only have one session per socket.
+	struct user *user = user_for_connection(socket);
+	if (user) return error_response("Already authenticated");
+
+	user = try_load_user(user_id->valuestring);
 	if (!user) return error_response("Invalid userID");
 	struct user *uptr = list_append(g_canvas.connected_users, *user)->thing;
 	free(user);
