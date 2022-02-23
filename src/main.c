@@ -572,7 +572,9 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 }
 
 cJSON *handle_get_canvas(const cJSON *user_id) {
-	(void)user_id; //TODO: Validate user
+	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
+	struct user *user = check_and_fetch_user(user_id->valuestring);
+	if (!user) return error_response("Not authenticated");
 	cJSON *canvas_array = cJSON_CreateArray();
 	cJSON *response = base_response("fullCanvas");
 	cJSON_InsertItemInArray(canvas_array, 0, response);
@@ -642,7 +644,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
 	
 	struct user *user = check_and_fetch_user(user_id->valuestring);
-	if (!user) return error_response("Invalid userID");
+	if (!user) return error_response("Not authenticated");
 	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
 	if (!is_within_rate_limit(user)) {
 		logr("Dropping tile place from %s\n", user->uuid);
@@ -678,7 +680,9 @@ cJSON *color_to_json(struct color color) {
 // we have an array where the first object is an object containing the responsetype, rest
 // are objects containing colors. *shrug*
 cJSON *handle_get_colors(const cJSON *user_id) {
-	(void)user_id; //TODO: Validate
+	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
+	struct user *user = check_and_fetch_user(user_id->valuestring);
+	if (!user) return error_response("Not authenticated");
 	//TODO: Might as well cache this color list instead of building it every time.
 	cJSON *color_list = cJSON_CreateArray();
 	cJSON *response_object = base_response("colorList");
