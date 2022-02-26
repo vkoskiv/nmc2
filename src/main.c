@@ -26,6 +26,9 @@ void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 // it based on that.
 #define NEW_DB_CANVAS_SIZE 512
 
+// Substitute before deploying
+#define ADMIN_USER_ID "<Desired userID here>"
+
 // We start ignoring tile placements if we get more than MAX_RATE per PER_SECONDS
 #define MAX_RATE 5
 #define PER_SECONDS 1
@@ -698,6 +701,56 @@ cJSON *handle_get_colors(const cJSON *user_id) {
 	return color_list;
 }
 
+cJSON *broadcast_announcement(const char *message) {
+	cJSON *payload_array = cJSON_CreateArray();
+	cJSON *payload = base_response("announcement");
+	cJSON_AddStringToObject(payload, "message", message);
+	cJSON_InsertItemInArray(payload_array, 0, payload);
+	broadcast(payload_array);
+	cJSON_Delete(payload_array);
+	return base_response("Success");
+}
+
+void drop_all_connections(void) {
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		user->last_connected_unix = (unsigned)time(NULL);
+		save_user(user);
+		mg_timer_free(&user->tile_increment_timer);
+		free(user->user_name);
+		//FIXME: Seems like mongoose has no way to disconnect a ws from server end?
+		list_remove(g_canvas.connected_users, {
+			const struct user *list_user = (struct user *)arg;
+			return list_user->socket == user->socket;
+		});
+		send_user_count();
+	}
+}
+
+cJSON *shut_down_server(void) {
+	cJSON *payload_array = cJSON_CreateArray();
+	cJSON *payload = base_response("disconnecting");
+	cJSON_InsertItemInArray(payload_array, 0, payload);
+	broadcast(payload_array);
+	cJSON_Delete(payload_array);
+	drop_all_connections();
+	g_running = false;
+	return NULL;
+}
+
+cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
+	if (!cJSON_IsString(user_id)) return error_response("No valid userID provided");
+	if (!str_eq(user_id->valuestring, ADMIN_USER_ID)) return error_response("Invalid userID");	
+	if (!cJSON_IsObject(command)) return error_response("No valid command object provided");
+	const cJSON *action = cJSON_GetObjectItem(command, "action");	
+	const cJSON *message = cJSON_GetObjectItem(command, "message");
+	if (!cJSON_IsString(action)) return error_response("Invalid command action");
+	if (str_eq(action->valuestring, "shutdown")) return shut_down_server();
+	if (str_eq(action->valuestring, "message")) return broadcast_announcement(message->valuestring);
+	return NULL;
+}
+
 cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connection) {
 	// cmd is not necessarily null-terminated. Trust len.
 	cJSON *command = cJSON_ParseWithLength(cmd, len);
@@ -710,7 +763,7 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	const cJSON *x = cJSON_GetObjectItem(command, "X");
 	const cJSON *y = cJSON_GetObjectItem(command, "Y");
 	const cJSON *color_id = cJSON_GetObjectItem(command, "colorID");
-
+	const cJSON *admin_cmd = cJSON_GetObjectItem(command, "cmd");
 	char *reqstr = request_type->valuestring;
 
 	cJSON *response = NULL;
@@ -724,6 +777,8 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 		response = handle_post_tile(user_id, x, y, color_id);
 	} else if (str_eq(reqstr, "getColors")) {
 		response = handle_get_colors(user_id);
+	} else if (str_eq(reqstr, "admin_cmd")) {
+		response = handle_admin_command(user_id, admin_cmd);
 	} else {
 		response = error_response("Unknown requestType");
 	}
