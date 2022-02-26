@@ -1011,9 +1011,7 @@ bool load_tiles(struct canvas *c) {
 
 bool set_up_db(struct canvas *c) {
 	int ret = 0;
-	//ret = sqlite3_open("pikselit2022.db", &c->backing_db);
-	//ret = sqlite3_open(":memory:", &c->backing_db);
-	ret = sqlite3_open("asdf.db", &c->backing_db);
+	ret = sqlite3_open(":memory:", &c->backing_db);
 	if (ret != SQLITE_OK) {
 		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_close(c->backing_db);
