@@ -1,5 +1,9 @@
 // Copyright (c) 2022 Valtteri Koskivuori (vkoskiv). All rights reserved.
 
+#ifdef __APPLE__
+#define UUID_STR_LEN 37
+#endif
+
 #include "vendored/mongoose.h"
 #include "vendored/cJSON.h"
 #include <uuid/uuid.h>
