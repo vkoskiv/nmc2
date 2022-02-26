@@ -30,8 +30,8 @@ void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 #define ADMIN_USER_ID "<Desired userID here>"
 
 // We start ignoring tile placements if we get more than MAX_RATE per PER_SECONDS
-#define MAX_RATE 5
-#define PER_SECONDS 1
+#define MAX_RATE 5.0f
+#define PER_SECONDS 1.0f
 
 // We will accept this many initialAuth requests per ip per hour
 #define MAX_ACCOUNTS_PER_HOUR 10
@@ -224,20 +224,17 @@ bool is_within_rate_limit(struct user *user) {
 	long ms_since_last_tile = get_ms_delta(user->last_tile_place);
 	gettimeofday(&user->last_tile_place, NULL);
 	float secs_since_last = (float)ms_since_last_tile / 1000.0f;
-	logr("debug: last tile place was %fs ago.\n", secs_since_last);
 	
-	user->allowance += secs_since_last * ((float)MAX_RATE / (float)PER_SECONDS);
-	if (user->allowance > (float)MAX_RATE) {
-		// Throttled
-		user->allowance = (float)MAX_RATE;
-	}
+	user->allowance += secs_since_last * (MAX_RATE / PER_SECONDS);
+	if (user->allowance > MAX_RATE) user->allowance = MAX_RATE;
+	// This sometimes leaks and goes to the else clause when it shouldn't
+	// I suspect it's a floating point precision thing.
 	if (user->allowance < 1.0f) {
 		is_within_limit = false;
 	} else {
 		user->allowance -= 1.0f;
 	}
 
-	// Finally, update the new last tile place time here
 	return is_within_limit;
 }
 
@@ -507,7 +504,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 	// Set up rate limiting
 	// FIXME: Save to db and load to prevent resetting allowance by re-authing
 	gettimeofday(&uptr->last_tile_place, NULL);
-	uptr->allowance = (float)MAX_RATE;
+	uptr->allowance = MAX_RATE;
 
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
@@ -549,7 +546,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	// Set up rate limiting
 	// FIXME: Save to db and load to prevent resetting allowance by re-authing
 	gettimeofday(&uptr->last_tile_place, NULL);
-	uptr->allowance = (float)MAX_RATE;
+	uptr->allowance = MAX_RATE;
 
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
@@ -633,11 +630,22 @@ void persist_tile_state(size_t x, size_t y, size_t color_id, const char *placer)
 	sqlite3_finalize(query);
 }
 
-cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param, const cJSON *color_id_param) {
+cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param, const cJSON *color_id_param, const char *raw_request, size_t raw_request_length) {
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
 	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
 	if (!cJSON_IsString(color_id_param)) return error_response("colorID not a string");
+
+	struct user *user = check_and_fetch_user(user_id->valuestring);
+	if (!user) return error_response("Not authenticated");
+	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
+
+	if (!is_within_rate_limit(user)) {
+		return error_response("Rate limit exceeded");
+	}
+
+	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
+	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
 
 	//Another ugly detail, the client sends the colorID number as a string...
 	uintmax_t num = strtoumax(color_id_param->valuestring, NULL, 10);
@@ -650,14 +658,6 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
 	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
-	
-	struct user *user = check_and_fetch_user(user_id->valuestring);
-	if (!user) return error_response("Not authenticated");
-	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
-	if (!is_within_rate_limit(user)) {
-		logr("Dropping tile place from %s\n", user->uuid);
-		return error_response("Rate limit exceeded");
-	}
 	
 	user->remaining_tiles--;
 	user->total_tiles_placed++;
@@ -757,7 +757,6 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	if (!command) return error_response("No command provided");
 	const cJSON *request_type = cJSON_GetObjectItem(command, "requestType");
 	if (!cJSON_IsString(request_type)) return error_response("No requestType provided");
-	logr("Received request: %.*s\n", (int)len, cmd);
 	
 	const cJSON *user_id = cJSON_GetObjectItem(command, "userID");
 	const cJSON *x = cJSON_GetObjectItem(command, "X");
@@ -774,7 +773,7 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	} else if (str_eq(reqstr, "getCanvas")) {
 		response = handle_get_canvas(user_id);
 	} else if (str_eq(reqstr, "postTile")) {
-		response = handle_post_tile(user_id, x, y, color_id);
+		response = handle_post_tile(user_id, x, y, color_id, cmd, len);
 	} else if (str_eq(reqstr, "getColors")) {
 		response = handle_get_colors(user_id);
 	} else if (str_eq(reqstr, "admin_cmd")) {
