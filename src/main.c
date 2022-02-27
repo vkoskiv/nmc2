@@ -1,6 +1,7 @@
 // Copyright (c) 2022 Valtteri Koskivuori (vkoskiv). All rights reserved.
 
-#ifdef __APPLE__
+// Some platforms just don't have this for whatever reason
+#ifndef UUID_STR_LEN
 #define UUID_STR_LEN 37
 #endif
 
