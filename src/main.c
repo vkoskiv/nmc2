@@ -33,9 +33,9 @@ void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 // Substitute before deploying
 #define ADMIN_USER_ID "<Desired userID here>"
 
-// We start ignoring tile placements if we get more than MAX_RATE per PER_SECONDS
-#define MAX_RATE 5.0f
-#define PER_SECONDS 1.0f
+// We start ignoring tile placements if we get more than MAX_TILE_RATE per PER_SECONDS_TILE
+#define MAX_TILE_RATE 5.0f
+#define PER_SECONDS_TILE 1.0f
 
 // We will accept this many initialAuth requests per ip per hour
 #define MAX_ACCOUNTS_PER_HOUR 10
@@ -169,6 +169,13 @@ void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
 
 // end linked list
 
+struct rate_limiter {
+	struct timeval last_event_time;
+	float current_allowance;
+	float max_rate;
+	float per_seconds;
+};
+
 struct user {
 	char *user_name;
 	char uuid[UUID_STR_LEN + 1];
@@ -177,9 +184,7 @@ struct user {
 	bool is_authenticated;
 	bool is_shadow_banned;
 
-	// Rate limiting
-	struct timeval last_tile_place;
-	float allowance;
+	struct rate_limiter tile_limiter;
 	
 	uint32_t remaining_tiles;
 	uint32_t max_tiles;
@@ -223,20 +228,18 @@ long get_ms_delta(struct timeval timer) {
 // 'Token bucket' algorithm
 // This particular implementation is adapted from this SO answer:
 // https://stackoverflow.com/a/668327
-bool is_within_rate_limit(struct user *user) {
+bool is_within_rate_limit(struct rate_limiter *limiter) {
 	bool is_within_limit = true;
-	long ms_since_last_tile = get_ms_delta(user->last_tile_place);
-	gettimeofday(&user->last_tile_place, NULL);
+	long ms_since_last_tile = get_ms_delta(limiter->last_event_time);
+	gettimeofday(&limiter->last_event_time, NULL);
 	float secs_since_last = (float)ms_since_last_tile / 1000.0f;
 	
-	user->allowance += secs_since_last * (MAX_RATE / PER_SECONDS);
-	if (user->allowance > MAX_RATE) user->allowance = MAX_RATE;
-	// This sometimes leaks and goes to the else clause when it shouldn't
-	// I suspect it's a floating point precision thing.
-	if (user->allowance < 1.0f) {
+	limiter->current_allowance += secs_since_last * (limiter->max_rate / limiter->per_seconds);
+	if (limiter->current_allowance > limiter->max_rate) limiter->current_allowance = limiter->max_rate;
+	if (limiter->current_allowance < 1.0f) {
 		is_within_limit = false;
 	} else {
-		user->allowance -= 1.0f;
+		limiter->current_allowance -= 1.0f;
 	}
 
 	return is_within_limit;
@@ -507,8 +510,8 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 
 	// Set up rate limiting
 	// FIXME: Save to db and load to prevent resetting allowance by re-authing
-	gettimeofday(&uptr->last_tile_place, NULL);
-	uptr->allowance = MAX_RATE;
+	uptr->tile_limiter = (struct rate_limiter){ .current_allowance = MAX_TILE_RATE, .max_rate = MAX_TILE_RATE, .per_seconds = PER_SECONDS_TILE };
+	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
 
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
@@ -549,8 +552,8 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 
 	// Set up rate limiting
 	// FIXME: Save to db and load to prevent resetting allowance by re-authing
-	gettimeofday(&uptr->last_tile_place, NULL);
-	uptr->allowance = MAX_RATE;
+	uptr->tile_limiter = (struct rate_limiter){ .current_allowance = MAX_TILE_RATE, .max_rate = MAX_TILE_RATE, .per_seconds = PER_SECONDS_TILE };
+	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
 
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
@@ -644,7 +647,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (!user) return error_response("Not authenticated");
 	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
 
-	if (!is_within_rate_limit(user)) {
+	if (!is_within_rate_limit(&user->tile_limiter)) {
 		return error_response("Rate limit exceeded");
 	}
 
