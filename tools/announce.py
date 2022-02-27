@@ -1,9 +1,21 @@
+#!/usr/bin/python3
 from websocket import create_connection
+import json
+import sys
+from cred import *
 
-ws = create_connection("ws://localhost:3001/ws")
+if 'Place' in admin_uuid:
+	print("Substitute a valid uuid in tools/cred.py before running these scripts")
+	exit(0)
 
-ws.send('{"requestType": "admin_cmd", "userID": "94E9AD2E-2D24-46F9-9612-A258BACFC5A2", "cmd": {"action": "message", "message": "Hello world!"}}')
+if len(sys.argv) < 2:
+	print('Usage: {} <url> <message>'.format(sys.argv[0]))
+	print('Example: {} ws://localhost:3001/ws \'Hello, world!\''.format(sys.argv[0]))
+	exit(0)
+
+ws = create_connection(sys.argv[1])
+payload = {'requestType': 'admin_cmd', 'userID': admin_uuid, 'cmd': {'action': 'message', 'message': sys.argv[2]}}
+ws.send(json.dumps(payload))
 result = ws.recv()
 print("Received '%s'" % result)
-
 ws.close()
