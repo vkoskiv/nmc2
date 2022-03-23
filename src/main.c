@@ -829,6 +829,8 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 		} else if (mg_http_match_uri(msg, "/shutdown")) {
 			//TODO: Handle shutdown
 			mg_http_reply(c, 200, "", "Unimplemented");
+		} else if (mg_http_match_uri(msg, "/brew_coffee")) {
+			mg_http_reply(c, 418, "", "Sorry, can't do that. :(");
 		}
 	} else if (event_type == MG_EV_WS_MSG) {
 		struct mg_ws_message *wm = (struct mg_ws_message *)event_data;
