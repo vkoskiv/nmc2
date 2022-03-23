@@ -1063,6 +1063,11 @@ void logr(const char *fmt, ...) {
 }
 
 int main(void) {
+	if (str_eq(ADMIN_USER_ID, "<Desired userID here>")) {
+		logr("Warning - Admin UUID still at default, anyone can shut down this server.\n");
+		logr("Substitute ADMIN_USER_ID in main.c with your desired UUID before running.\n");
+		exit(-1);
+	}
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
 		printf("Failed to register sigint handler\n");
 		return -1;
