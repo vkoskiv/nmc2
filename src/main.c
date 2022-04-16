@@ -5,6 +5,8 @@
 #define UUID_STR_LEN 37
 #endif
 
+//TODO: Save users, hosts and the canvas in a timer instead of on every request
+
 #include "vendored/mongoose.h"
 #include "vendored/cJSON.h"
 #include <uuid/uuid.h>
@@ -34,12 +36,12 @@ void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 // Substitute before deploying
 #define ADMIN_USER_ID "<Desired userID here>"
 
-// We start ignoring tile placements if we get more than MAX_TILE_RATE per PER_SECONDS_TILE
-#define MAX_TILE_RATE 5.0f
-#define PER_SECONDS_TILE 1.0f
+// Same deal for getCanvas
+#define MAX_GETCANVAS_RATE 1.0f
+#define PER_SECONDS_GETCANVAS 10.0f
 
-// We will accept this many initialAuth requests per ip per hour
-#define MAX_ACCOUNTS_PER_HOUR 10
+#define MAX_SETPIXEL_RATE 5.0f
+#define PER_SECONDS_SETPIXEL 1.0f
 
 // And also cap the total amount of user IDs for a given IP
 #define MAX_USERS_PER_IP 64
@@ -185,6 +187,7 @@ struct user {
 	bool is_authenticated;
 	bool is_shadow_banned;
 
+	struct rate_limiter canvas_limiter;
 	struct rate_limiter tile_limiter;
 	
 	uint32_t remaining_tiles;
@@ -206,6 +209,7 @@ struct tile {
 
 struct canvas {
 	struct list connected_users;
+	struct list connected_hosts;
 	uint8_t *tiles;
 	uint32_t edge_length;
 	struct mg_timer ws_ping_timer;
@@ -217,7 +221,6 @@ struct canvas {
 struct remote_host {
 	struct mg_addr addr;
 	size_t total_accounts;
-
 };
 
 long get_ms_delta(struct timeval timer) {
@@ -307,8 +310,32 @@ cJSON *error_response(char *error_message) {
 	return error;
 }
 
+void save_host(const struct remote_host *host) {
+	const char *sql = "UPDATE hosts SET total_accounts = ? WHERE ip_address = ?";
+	sqlite3_stmt *query;
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	if (ret != SQLITE_OK) {
+		printf("Failed to prepare host save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	int idx = 1;
+	ret = sqlite3_bind_int(query, idx++, host->total_accounts);
+	ret = sqlite3_bind_int(query, idx++, host->addr.ip);
+
+	ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to update host: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	sqlite3_finalize(query);
+}
+
 void save_user(const struct user *user) {
-	const char *sql = "UPDATE users SET username = ?, remainingTiles = ?, tileRegenSeconds = ?, totalTilesPlaced = ?, lastConnected = ?, level = ?, hasSetUsername = ?, isShadowBanned = ?, maxTiles = ?, tilesToNextLevel = ?, levelProgress = ? WHERE uuid = ?";
+	const char *sql = "UPDATE users SET username = ?, remainingTiles = ?, tileRegenSeconds = ?, totalTilesPlaced = ?, lastConnected = ?, level = ?, hasSetUsername = ?, isShadowBanned = ?, maxTiles = ?, tilesToNextLevel = ?, levelProgress = ?, cl_last_event_sec = ?, cl_last_event_usec = ?, cl_current_allowance = ?, cl_max_rate = ?, cl_per_seconds = ?, tl_last_event_sec = ?, tl_last_event_usec = ?, tl_current_allowance = ?, tl_max_rate = ?, tl_per_seconds = ? WHERE uuid = ?";
 	sqlite3_stmt *query;
 	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
@@ -329,6 +356,16 @@ void save_user(const struct user *user) {
 	ret = sqlite3_bind_int(query, idx++, user->max_tiles);
 	ret = sqlite3_bind_int(query, idx++, user->tiles_to_next_level);
 	ret = sqlite3_bind_int(query, idx++, user->current_level_progress);
+	ret = sqlite3_bind_int(query, idx++, user->canvas_limiter.last_event_time.tv_sec);
+	ret = sqlite3_bind_int64(query, idx++, user->canvas_limiter.last_event_time.tv_usec);
+	ret = sqlite3_bind_double(query, idx++, user->canvas_limiter.current_allowance);
+	ret = sqlite3_bind_double(query, idx++, user->canvas_limiter.max_rate);
+	ret = sqlite3_bind_double(query, idx++, user->canvas_limiter.per_seconds);
+	ret = sqlite3_bind_int(query, idx++, user->tile_limiter.last_event_time.tv_sec);
+	ret = sqlite3_bind_int64(query, idx++, user->tile_limiter.last_event_time.tv_usec);
+	ret = sqlite3_bind_double(query, idx++, user->tile_limiter.current_allowance);
+	ret = sqlite3_bind_double(query, idx++, user->tile_limiter.max_rate);
+	ret = sqlite3_bind_double(query, idx++, user->tile_limiter.per_seconds);
 	ret = sqlite3_bind_text(query, idx++, user->uuid, strlen(user->uuid), NULL);
 
 	ret = sqlite3_step(query);
@@ -370,11 +407,39 @@ void send_user_count(void) {
 	cJSON_Delete(payload_wrapper);
 }
 
+void add_host(const struct remote_host *host) {
+	sqlite3_stmt *query;
+	const char *sql = "INSERT INTO hosts (ip_address, total_accounts) VALUES (?, ?)";
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	if (ret != SQLITE_OK) {
+		printf("Failed to prepare host insert query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+	int idx = 1;
+	ret = sqlite3_bind_int(query, idx++, host->addr.ip);
+	ret = sqlite3_bind_int(query, idx++, host->total_accounts);
+
+	ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to insert host: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		sqlite3_finalize(query);
+		sqlite3_close(g_canvas.backing_db);
+		exit(-1);
+	}
+
+	char ip_buf[50];
+	mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
+	logr("Adding new host %s\n", ip_buf);
+	sqlite3_finalize(query);
+}
+
 void add_user(const struct user *user) {
 	sqlite3_stmt *query;
 	const char *sql =
-		"INSERT INTO users (username, uuid, remainingTiles, tileRegenSeconds, totalTilesPlaced, lastConnected, availableColors, level, hasSetUsername, isShadowBanned, maxTiles, tilesToNextLevel, levelProgress)"
-		" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+		"INSERT INTO users (username, uuid, remainingTiles, tileRegenSeconds, totalTilesPlaced, lastConnected, availableColors, level, hasSetUsername, isShadowBanned, maxTiles, tilesToNextLevel, levelProgress, cl_last_event_sec, cl_last_event_usec, cl_current_allowance, cl_max_rate, cl_per_seconds, tl_last_event_sec, tl_last_event_usec, tl_current_allowance, tl_max_rate, tl_per_seconds)"
+		" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
 		printf("Failed to prepare user insert query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
@@ -396,6 +461,16 @@ void add_user(const struct user *user) {
 	sqlite3_bind_int(query, idx++, user->max_tiles);
 	sqlite3_bind_int(query, idx++, user->tiles_to_next_level);
 	sqlite3_bind_int(query, idx++, user->current_level_progress);
+	sqlite3_bind_int(query, idx++, user->canvas_limiter.last_event_time.tv_sec);
+	sqlite3_bind_int64(query, idx++, user->canvas_limiter.last_event_time.tv_usec);
+	sqlite3_bind_double(query, idx++, user->canvas_limiter.current_allowance);
+	sqlite3_bind_double(query, idx++, user->canvas_limiter.max_rate);
+	sqlite3_bind_double(query, idx++, user->canvas_limiter.per_seconds);
+	sqlite3_bind_int(query, idx++, user->tile_limiter.last_event_time.tv_sec);
+	sqlite3_bind_int64(query, idx++, user->tile_limiter.last_event_time.tv_usec);
+	sqlite3_bind_double(query, idx++, user->tile_limiter.current_allowance);
+	sqlite3_bind_double(query, idx++, user->tile_limiter.max_rate);
+	sqlite3_bind_double(query, idx++, user->tile_limiter.per_seconds);
 
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
@@ -404,7 +479,38 @@ void add_user(const struct user *user) {
 		sqlite3_close(g_canvas.backing_db);
 		exit(-1);
 	}
+	sqlite3_finalize(query);
 	printf("Inserted user %s\n", user->uuid);
+}
+
+struct remote_host *try_load_host(struct mg_addr addr) {
+	sqlite3_stmt *query;
+	int ret = sqlite3_prepare_v2(g_canvas.backing_db, "SELECT * FROM hosts WHERE ip_address = ?", -1, &query, 0);
+	if (ret != SQLITE_OK) {
+		logr("Failed to prepare host load query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		return NULL;
+	}
+	ret = sqlite3_bind_int(query, 1, addr.ip);
+	if (ret != SQLITE_OK) {
+		logr("Failed to bind ip to host load query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		return NULL;
+	}
+	int step = sqlite3_step(query);
+
+	struct remote_host *host = NULL;
+	if (step != SQLITE_ROW) {
+		return NULL;
+	}
+
+	size_t i = 1;
+	host = calloc(1, sizeof(*host));
+
+	host->addr.ip = sqlite3_column_int(query, i++);
+	host->total_accounts = sqlite3_column_int(query, i++);
+
+	sqlite3_finalize(query);
+
+	return host;
 }
 
 struct user *try_load_user(const char *uuid) {
@@ -433,6 +539,17 @@ struct user *try_load_user(const char *uuid) {
 		user->max_tiles = sqlite3_column_int(query, i++);
 		user->tiles_to_next_level = sqlite3_column_int(query, i++);
 		user->current_level_progress = sqlite3_column_int(query, i++);
+
+		user->canvas_limiter.last_event_time.tv_sec = sqlite3_column_int(query, i++);
+		user->canvas_limiter.last_event_time.tv_usec = sqlite3_column_int64(query, i++);
+		user->canvas_limiter.current_allowance = sqlite3_column_double(query, i++);
+		user->canvas_limiter.max_rate = sqlite3_column_double(query, i++);
+		user->canvas_limiter.per_seconds = sqlite3_column_double(query, i++);
+		user->tile_limiter.last_event_time.tv_sec = sqlite3_column_int(query, i++);
+		user->tile_limiter.last_event_time.tv_usec = sqlite3_column_int64(query, i++);
+		user->tile_limiter.current_allowance = sqlite3_column_double(query, i++);
+		user->tile_limiter.max_rate = sqlite3_column_double(query, i++);
+		user->tile_limiter.per_seconds = sqlite3_column_double(query, i++);
 	}
 	sqlite3_finalize(query);
 	return user;
@@ -488,7 +605,22 @@ void dump_connected_users(void) {
 	printf("Connected users: %lu\n", users);
 }
 
-cJSON *handle_initial_auth(struct mg_connection *socket) {
+void init_rate_limiter(struct rate_limiter *limiter, float max_rate, float per_seconds) {
+	*limiter = (struct rate_limiter){ .current_allowance = max_rate, .max_rate = max_rate, .per_seconds = per_seconds };
+	gettimeofday(&limiter->last_event_time, NULL);
+}
+
+cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *host) {
+
+	host->total_accounts++;
+	save_host(host);
+	if (host->total_accounts >= MAX_USERS_PER_IP) {
+		char ip_buf[50];
+		mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
+		logr("Rejecting initialAuth from %s, reached maximum of %i users\n", ip_buf, MAX_USERS_PER_IP);
+		return error_response("Maximum users reached for this IP (contact vkoskiv if you think this is an issue)");
+	}
+
 	struct user user = {
 		.user_name = str_cpy("Anonymous"),
 		.socket = socket,
@@ -503,16 +635,15 @@ cJSON *handle_initial_auth(struct mg_connection *socket) {
 		.last_connected_unix = 0,
 	};
 	generate_uuid(user.uuid);
-	//FIXME: Do rate limiting
 	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
 	add_user(uptr);
 	dump_connected_users();
 	uptr->socket = socket;
 
 	// Set up rate limiting
-	// FIXME: Save to db and load to prevent resetting allowance by re-authing
-	uptr->tile_limiter = (struct rate_limiter){ .current_allowance = MAX_TILE_RATE, .max_rate = MAX_TILE_RATE, .per_seconds = PER_SECONDS_TILE };
-	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
+	init_rate_limiter(&uptr->canvas_limiter, MAX_GETCANVAS_RATE, PER_SECONDS_GETCANVAS);
+	init_rate_limiter(&uptr->tile_limiter, MAX_SETPIXEL_RATE, PER_SECONDS_SETPIXEL);
+	save_user(uptr);
 
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
@@ -551,11 +682,6 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	dump_connected_users();
 	uptr->socket = socket;
 
-	// Set up rate limiting
-	// FIXME: Save to db and load to prevent resetting allowance by re-authing
-	uptr->tile_limiter = (struct rate_limiter){ .current_allowance = MAX_TILE_RATE, .max_rate = MAX_TILE_RATE, .per_seconds = PER_SECONDS_TILE };
-	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
-
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
 
@@ -588,6 +714,14 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
+
+	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
+	save_user(user); // Save rate limiter state
+	if (!within_limit) {
+		logr("CANVAS rate limit exceeded\n");
+		return error_response("Rate limit exceeded");
+	}
+
 	cJSON *canvas_array = cJSON_CreateArray();
 	cJSON *response = base_response("fullCanvas");
 	cJSON_InsertItemInArray(canvas_array, 0, response);
@@ -595,6 +729,7 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 	for (size_t i = 0; i < tiles; ++i) {
 		cJSON_AddItemToArray(canvas_array, cJSON_CreateNumber(g_canvas.tiles[i]));
 	}
+	logr("Serving canvas to %s\n", user->uuid);
 	return canvas_array;
 }
 
@@ -645,12 +780,13 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (!cJSON_IsString(color_id_param)) return error_response("colorID not a string");
 
 	struct user *user = check_and_fetch_user(user_id->valuestring);
-	if (!user) return error_response("Not authenticated");
-	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
 
 	if (!is_within_rate_limit(&user->tile_limiter)) {
 		return error_response("Rate limit exceeded");
 	}
+
+	if (!user) return error_response("Not authenticated");
+	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
 
 	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
 	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
@@ -759,12 +895,43 @@ cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	return NULL;
 }
 
+bool mg_addr_eq(struct mg_addr a, struct mg_addr b) {
+	return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+struct remote_host *find_host(struct mg_addr addr) {
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_hosts) {
+		struct remote_host *host = (struct remote_host *)elem->thing;
+		if (mg_addr_eq(host->addr, addr)) return host;
+	}
+	struct remote_host *host = try_load_host(addr);
+	if (host) {
+		struct remote_host *hptr = list_append(g_canvas.connected_hosts, *host)->thing;
+		free(host);
+		return hptr;
+	}
+
+	char ip_buf[50];
+	mg_ntoa(&addr, ip_buf, sizeof(ip_buf));
+	logr("Adding new host %s\n", ip_buf);
+	struct remote_host new = {
+		.addr = addr,
+	};
+	host = list_append(g_canvas.connected_hosts, new)->thing;
+	add_host(host);
+
+	return host;
+}
+
 cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connection) {
 	// cmd is not necessarily null-terminated. Trust len.
 	cJSON *command = cJSON_ParseWithLength(cmd, len);
 	if (!command) return error_response("No command provided");
 	const cJSON *request_type = cJSON_GetObjectItem(command, "requestType");
 	if (!cJSON_IsString(request_type)) return error_response("No requestType provided");
+
+	struct remote_host *host = find_host(connection->peer);
 	
 	const cJSON *user_id = cJSON_GetObjectItem(command, "userID");
 	const cJSON *x = cJSON_GetObjectItem(command, "X");
@@ -775,7 +942,7 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 
 	cJSON *response = NULL;
 	if (str_eq(reqstr, "initialAuth")) {
-		response = handle_initial_auth(connection);
+		response = handle_initial_auth(connection, host);
 	} else if (str_eq(reqstr, "auth")) {
 		response = handle_auth(user_id, connection);
 	} else if (str_eq(reqstr, "getCanvas")) {
@@ -816,6 +983,7 @@ void drop_user_with_connection(struct mg_connection *c) {
 
 static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
 	(void)arg; // TODO: Pass around a canvas instead of having that global up there
+
 	if (event_type == MG_EV_HTTP_MSG) {
 		struct mg_http_message *msg = (struct mg_http_message *)event_data;
 		if (mg_http_match_uri(msg, "/ws")) {
@@ -963,6 +1131,16 @@ void ensure_users_table(sqlite3 *db) {
 				",  `maxTiles` integer NOT NULL"
 				",  `tilesToNextLevel` integer NOT NULL"
 				",  `levelProgress` integer NOT NULL"
+				",  `cl_last_event_sec` integer not null"
+				",  `cl_last_event_usec` integer not null"
+				",  `cl_current_allowance` real not null"
+				",  `cl_max_rate` real not null"
+				",  `cl_per_seconds` real not null"
+				",  `tl_last_event_sec` integer not null"
+				",  `tl_last_event_usec` integer not null"
+				",  `tl_current_allowance` real not null"
+				",  `tl_max_rate` real not null"
+				",  `tl_per_seconds` real not null"
 				")";
 	sqlite3_prepare_v2(db, schema, -1, &query, NULL);
 	int ret = sqlite3_step(query);
@@ -972,11 +1150,32 @@ void ensure_users_table(sqlite3 *db) {
 		sqlite3_close(db);
 		exit(-1);
 	}
+	sqlite3_finalize(query);
+}
+
+void ensure_hosts_table(sqlite3 *db) {
+	sqlite3_stmt *query;
+	char *schema =
+				"CREATE TABLE IF NOT EXISTS `hosts` ("
+  				"   `id` integer  NOT NULL PRIMARY KEY AUTOINCREMENT"
+				",  `ip_address` integer NOT NULL"
+				",  `total_accounts` integer NOT NULL"
+				")";
+	sqlite3_prepare_v2(db, schema, -1, &query, NULL);
+	int ret = sqlite3_step(query);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to create users table: %s\n", sqlite3_errmsg(db));
+		sqlite3_finalize(query);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	sqlite3_finalize(query);
 }
 
 void ensure_valid_db(sqlite3 *db) {
 	ensure_tiles_table(db);
 	ensure_users_table(db);
+	ensure_hosts_table(db);
 }
 
 bool load_tiles(struct canvas *c) {
@@ -1001,6 +1200,7 @@ bool load_tiles(struct canvas *c) {
 
 	g_canvas.tiles = calloc(g_canvas.edge_length * g_canvas.edge_length, 1);
 	g_canvas.connected_users = LIST_INITIALIZER;
+	g_canvas.connected_hosts = LIST_INITIALIZER;
 	printf("Loading %ux%u canvas...\n", c->edge_length, c->edge_length);
 
 	sqlite3_stmt *query;
@@ -1099,6 +1299,7 @@ int main(void) {
 		free(user->user_name);
 	}
 	list_destroy(g_canvas.connected_users);
+	list_destroy(g_canvas.connected_hosts);
 	sqlite3_close(g_canvas.backing_db);
 	return 0;
 }
