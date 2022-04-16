@@ -1265,6 +1265,7 @@ void logr(const char *fmt, ...) {
 }
 
 int main(void) {
+	setbuf(stdout, NULL); // Disable output buffering
 	if (str_eq(ADMIN_USER_ID, "<Desired userID here>")) {
 		logr("Warning - Admin UUID still at default, anyone can shut down this server.\n");
 		logr("Substitute ADMIN_USER_ID in main.c with your desired UUID before running.\n");
