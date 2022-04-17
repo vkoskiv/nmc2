@@ -1258,6 +1258,8 @@ bool set_up_db(struct canvas *c) {
 		return true;
 	}
 
+	// I might mess with the db while it's in use.
+	sqlite3_busy_timeout(c->backing_db, 2000);
 	ensure_valid_db(c->backing_db);
 	load_tiles(c);
 
