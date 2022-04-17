@@ -868,6 +868,7 @@ cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
+	logr("User %s set their username to %s\n", user_id->valuestring, name->valuestring);
 	strncpy(user->user_name, name->valuestring, sizeof(user->user_name));
 	save_user(user);
 	return base_response("nameSetSuccess");
