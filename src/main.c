@@ -46,6 +46,11 @@ void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 // And also cap the total amount of user IDs for a given IP
 #define MAX_USERS_PER_IP 64
 
+#define MAX_NICK_LEN 64
+
+#define CANVAS_SAVE_INTERVAL_SEC 60
+#define WEBSOCKET_PING_INTERVAL_SEC 25
+
 // end config
 
 // These come from the original implementation here:
@@ -180,7 +185,7 @@ struct rate_limiter {
 };
 
 struct user {
-	char *user_name;
+	char user_name[MAX_NICK_LEN];
 	char uuid[UUID_STR_LEN + 1];
 	struct mg_connection *socket;
 	struct mg_timer tile_increment_timer;
@@ -201,18 +206,19 @@ struct user {
 };
 
 struct tile {
-	uint32_t x;
-	uint32_t y;
 	uint32_t color_id;
 	uint64_t place_time_unix;
+	char last_modifier[MAX_NICK_LEN];
 };
 
 struct canvas {
 	struct list connected_users;
 	struct list connected_hosts;
-	uint8_t *tiles;
+	struct tile *tiles;
+	bool dirty;
 	uint32_t edge_length;
 	struct mg_timer ws_ping_timer;
+	struct mg_timer canvas_save_timer;
 	sqlite3 *backing_db; // For persistence
 };
 
@@ -263,6 +269,43 @@ static struct canvas g_canvas;
 static bool g_running = true;
 
 static const char *s_listen_on = "ws://0.0.0.0:3001";
+
+size_t get_file_size(const char *file_path) {
+	FILE *file = fopen(file_path, "r");
+	if (!file) return 0;
+	fseek(file, 0L, SEEK_END);
+	size_t size = ftell(file);
+	fclose(file);
+	return size;
+}
+
+char *load_file(const char *file_path, size_t *bytes) {
+	FILE *file = fopen(file_path, "r");
+	if (!file) {
+		logr("File not found at %s\n", file_path);
+		return NULL;
+	}
+	size_t file_bytes = get_file_size(file_path);
+	if (!file_bytes) {
+		fclose(file);
+		return NULL;
+	}
+	char *buf = malloc(file_bytes + 1 * sizeof(char));
+	size_t read_bytes = fread(buf, sizeof(char), file_bytes, file);
+	if (read_bytes != file_bytes) {
+		logr("Failed to load file at %s\n", file_path);
+		fclose(file);
+		return NULL;
+	}
+	if (ferror(file) != 0) {
+		logr("Error reading file %s\n", file_path);
+	} else {
+		buf[file_bytes] = '\0';
+	}
+	fclose(file);
+	if (bytes) *bytes = read_bytes;
+	return buf;
+}
 
 void generate_uuid(char *buf) {
 	if (!buf) return;
@@ -525,7 +568,7 @@ struct user *try_load_user(const char *uuid) {
 		size_t i = 1;
 		user = calloc(1, sizeof(*user));
 		const char *user_name = (const char *)sqlite3_column_text(query, i++);
-		user->user_name = str_cpy(user_name);
+		strncpy(user->user_name, user_name, sizeof(user->user_name));
 		const char *uuid = (const char *)sqlite3_column_text(query, i++);
 		strncpy(user->uuid, uuid, UUID_STR_LEN);
 		user->remaining_tiles = sqlite3_column_int(query, i++);
@@ -622,7 +665,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	}
 
 	struct user user = {
-		.user_name = str_cpy("Anonymous"),
+		.user_name = "Anonymous",
 		.socket = socket,
 		.is_authenticated = true,
 		.remaining_tiles = 60,
@@ -727,7 +770,7 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 	cJSON_InsertItemInArray(canvas_array, 0, response);
 	size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
 	for (size_t i = 0; i < tiles; ++i) {
-		cJSON_AddItemToArray(canvas_array, cJSON_CreateNumber(g_canvas.tiles[i]));
+		cJSON_AddItemToArray(canvas_array, cJSON_CreateNumber(g_canvas.tiles[i].color_id));
 	}
 	logr("Serving canvas to %s\n", user->uuid);
 	return canvas_array;
@@ -741,36 +784,6 @@ cJSON *new_tile_update(size_t x, size_t y, size_t color_id) {
 	cJSON_AddNumberToObject(payload, "colorID", color_id);
 	cJSON_InsertItemInArray(payload_array, 0, payload);
 	return payload_array;
-}
-
-void persist_tile_state(size_t x, size_t y, size_t color_id, const char *placer) {
-	const char *sql = "UPDATE tiles SET colorID = ?, lastModifier = ?, placeTime = ? WHERE X = ? AND Y = ?";
-	if (!sqlite3_get_autocommit(g_canvas.backing_db)) {
-		printf("HOX! Not in autocommit mode!\n");
-	}
-	sqlite3_stmt *query;
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, NULL);
-	if (ret != SQLITE_OK) {
-		printf("Failed to prepare tile save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
-		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
-		exit(-1);
-	}
-	int idx = 1;
-	ret = sqlite3_bind_int(query, idx++, color_id);
-	ret = sqlite3_bind_text(query, idx++, placer, strlen(placer), NULL);
-	ret = sqlite3_bind_int(query, idx++, (unsigned)time(NULL));
-	ret = sqlite3_bind_int(query, idx++, x);
-	ret = sqlite3_bind_int(query, idx++, y);
-	
-	ret = sqlite3_step(query);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to persist tile: %s\n", sqlite3_errmsg(g_canvas.backing_db));
-		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
-		exit(-1);
-	}
-	sqlite3_finalize(query);
 }
 
 cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param, const cJSON *color_id_param, const char *raw_request, size_t raw_request_length) {
@@ -811,8 +824,12 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	}
 	save_user(user);
 
-	g_canvas.tiles[x + y * g_canvas.edge_length] = color_id;
-	persist_tile_state(x, y, color_id, user->uuid);
+	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
+	tile->color_id = color_id;
+	tile->place_time_unix = (unsigned)time(NULL);
+	strncpy(tile->last_modifier, user->user_name, sizeof(tile->last_modifier));
+	g_canvas.dirty = true;
+
 	cJSON *update = new_tile_update(x, y, color_id);
 	broadcast(update);
 	cJSON_Delete(update);
@@ -845,6 +862,17 @@ cJSON *handle_get_colors(const cJSON *user_id) {
 	return color_list;
 }
 
+cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
+	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
+	if (!cJSON_IsString(name)) return error_response("No nickname provided");
+	struct user *user = check_and_fetch_user(user_id->valuestring);
+	if (!user) return error_response("Not authenticated");
+	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
+	strncpy(user->user_name, name->valuestring, sizeof(user->user_name));
+	save_user(user);
+	return base_response("nameSetSuccess");
+}
+
 cJSON *broadcast_announcement(const char *message) {
 	cJSON *payload_array = cJSON_CreateArray();
 	cJSON *payload = base_response("announcement");
@@ -855,6 +883,26 @@ cJSON *broadcast_announcement(const char *message) {
 	return base_response("Success");
 }
 
+void drop_user_with_connection(struct mg_connection *c) {
+	logr("drop_user_with_connection: %lu\n", list_elems(&g_canvas.connected_users));
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		if (user->socket != c) continue;
+		printf("User %s disconnected.\n", user->uuid);
+		user->last_connected_unix = (unsigned)time(NULL);
+		save_user(user);
+		mg_timer_free(&user->tile_increment_timer);
+		list_remove(g_canvas.connected_users, {
+			const struct user *list_user = (struct user *)arg;
+			return list_user->socket == user->socket;
+		});
+		break;
+	}
+	send_user_count();
+	dump_connected_users();
+}
+
 void drop_all_connections(void) {
 	struct list_elem *elem = NULL;
 	list_foreach(elem, g_canvas.connected_users) {
@@ -862,7 +910,6 @@ void drop_all_connections(void) {
 		user->last_connected_unix = (unsigned)time(NULL);
 		save_user(user);
 		mg_timer_free(&user->tile_increment_timer);
-		free(user->user_name);
 		//FIXME: Seems like mongoose has no way to disconnect a ws from server end?
 		list_remove(g_canvas.connected_users, {
 			const struct user *list_user = (struct user *)arg;
@@ -873,12 +920,6 @@ void drop_all_connections(void) {
 }
 
 cJSON *shut_down_server(void) {
-	cJSON *payload_array = cJSON_CreateArray();
-	cJSON *payload = base_response("disconnecting");
-	cJSON_InsertItemInArray(payload_array, 0, payload);
-	broadcast(payload_array);
-	cJSON_Delete(payload_array);
-	drop_all_connections();
 	g_running = false;
 	return NULL;
 }
@@ -933,10 +974,11 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 
 	struct remote_host *host = find_host(connection->peer);
 	
-	const cJSON *user_id = cJSON_GetObjectItem(command, "userID");
-	const cJSON *x = cJSON_GetObjectItem(command, "X");
-	const cJSON *y = cJSON_GetObjectItem(command, "Y");
-	const cJSON *color_id = cJSON_GetObjectItem(command, "colorID");
+	const cJSON *user_id   = cJSON_GetObjectItem(command, "userID");
+	const cJSON *name      = cJSON_GetObjectItem(command, "name");
+	const cJSON *x         = cJSON_GetObjectItem(command, "X");
+	const cJSON *y         = cJSON_GetObjectItem(command, "Y");
+	const cJSON *color_id  = cJSON_GetObjectItem(command, "colorID");
 	const cJSON *admin_cmd = cJSON_GetObjectItem(command, "cmd");
 	char *reqstr = request_type->valuestring;
 
@@ -951,6 +993,8 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 		response = handle_post_tile(user_id, x, y, color_id, cmd, len);
 	} else if (str_eq(reqstr, "getColors")) {
 		response = handle_get_colors(user_id);
+	} else if (str_eq(reqstr, "setUsername")) {
+		response = handle_set_nickname(user_id, name);
 	} else if (str_eq(reqstr, "admin_cmd")) {
 		response = handle_admin_command(user_id, admin_cmd);
 	} else {
@@ -959,26 +1003,6 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 
 	cJSON_Delete(command);
 	return response;
-}
-
-void drop_user_with_connection(struct mg_connection *c) {
-	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
-		struct user *user = (struct user *)elem->thing;
-		if (user->socket != c) continue;
-		printf("User %s disconnected.\n", user->uuid);
-		user->last_connected_unix = (unsigned)time(NULL);
-		save_user(user);
-		mg_timer_free(&user->tile_increment_timer);
-		free(user->user_name);
-		list_remove(g_canvas.connected_users, {
-			const struct user *list_user = (struct user *)arg;
-			return list_user->socket == user->socket;
-		});
-		break;
-	}
-	send_user_count();
-	dump_connected_users();
 }
 
 static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
@@ -1017,35 +1041,91 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 static void ping_timer_fn(void *arg) {
 	struct mg_mgr *mgr = (struct mg_mgr *)arg;
 	for (struct mg_connection *c = mgr->conns; c != NULL && c->is_websocket; c = c->next) {
-		//printf("%d Sending PING to connection %lu with label %s\n", (unsigned)time(NULL), c->id, c->label);
 		mg_ws_send(c, NULL, 0, WEBSOCKET_OP_PING);
 	}
 }
 
-void ensure_tiles_table(sqlite3 *db) {
-	sqlite3_stmt *query;
-	char *schema =
-		"CREATE TABLE IF NOT EXISTS `tiles` ("
-		"`id` integer  NOT NULL PRIMARY KEY AUTOINCREMENT"
-		",  `X` integer NOT NULL"
-		",  `Y` integer NOT NULL"
-		",  `colorID` integer NOT NULL"
-		",  `lastModifier` varchar(255) NOT NULL"
-		",  `placeTime` integer NOT NULL"
-		")";
+static void canvas_save_timer_fn(void *arg) {
+	//struct mg_mgr *mgr = (struct mg_mgr *)arg;
+	(void)arg;
 
-	sqlite3_prepare_v2(db, schema, -1, &query, NULL);
-	int ret = sqlite3_step(query);
+	if (!g_canvas.dirty) return;
+
+	sqlite3 *db = g_canvas.backing_db;
+	logr("Saving canvas to disk...\n");
+	
+	struct timeval timer;
+	gettimeofday(&timer, NULL);
+
+	sqlite3_stmt *bt;
+	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
+	int ret = sqlite3_step(bt);
 	if (ret != SQLITE_DONE) {
-		printf("Failed to create tiles table\n");
-		sqlite3_finalize(query);
+		printf("Failed to begin transaction\n");
+		sqlite3_finalize(bt);
 		sqlite3_close(db);
 		exit(-1);
 	}
-	sqlite3_finalize(query);
+	sqlite3_finalize(bt);
+
+	sqlite3_stmt *insert;
+	ret = sqlite3_prepare_v2(db, "UPDATE tiles SET colorID = ?, lastModifier = ?, placeTime = ? WHERE X = ? AND Y = ?", -1, &insert, NULL);
+	if (ret != SQLITE_OK) {
+		printf("Failed to prepare tile update: %s\n", sqlite3_errmsg(db));
+		goto bail;
+	}
+
+	for (size_t y = 0; y < g_canvas.edge_length; ++y) {
+		for (size_t x = 0; x < g_canvas.edge_length; ++x) {
+			int idx = 1;
+			struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
+			ret = sqlite3_bind_int(insert, idx++, tile->color_id);
+			if (ret != SQLITE_OK) printf("Failed to bind colorID: %s\n", sqlite3_errmsg(db));
+			ret = sqlite3_bind_text(insert, idx++, tile->last_modifier, sizeof(tile->last_modifier), NULL);
+			if (ret != SQLITE_OK) printf("Failed to bind lastModifier: %s\n", sqlite3_errmsg(db));
+			ret = sqlite3_bind_int64(insert, idx++, tile->place_time_unix);
+			if (ret != SQLITE_OK) printf("Failed to bind placeTime: %s\n", sqlite3_errmsg(db));
+			ret = sqlite3_bind_int(insert, idx++, x);
+			if (ret != SQLITE_OK) printf("Failed to bind X: %s\n", sqlite3_errmsg(db));
+			ret = sqlite3_bind_int(insert, idx++, y);
+			if (ret != SQLITE_OK) printf("Failed to bind Y: %s\n", sqlite3_errmsg(db));
+
+			int res = sqlite3_step(insert);
+			if (res != SQLITE_DONE) {
+				printf("Failed to UPDATE for x = %lu, y = %lu\n", x, y);
+				sqlite3_finalize(insert);
+				sqlite3_close(db);
+				exit(-1);
+			}
+			sqlite3_clear_bindings(insert);
+			sqlite3_reset(insert);
+		}
+	}
+bail:
+	sqlite3_finalize(insert);
+
+	sqlite3_stmt *et;
+	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
+	ret = sqlite3_step(et);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to commit transaction\n");
+		sqlite3_finalize(et);
+		sqlite3_close(db);
+		exit(-1);
+	} else {
+		struct timeval timer_end;
+		gettimeofday(&timer_end, NULL);
+		long ms = 1000 * (timer_end.tv_sec - timer.tv_sec) + ((timer_end.tv_usec - timer.tv_usec) / 1000);
+		logr("Done, that took %lims\n", ms);
+		g_canvas.dirty = false;
+	}
+	sqlite3_finalize(et);
+}
+
+void ensure_tiles_table(sqlite3 *db) {
 	// Next, ensure we've got tiles in there.
 	sqlite3_stmt *count;
-	ret = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tiles", -1, &count, NULL);
+	int ret = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tiles", -1, &count, NULL);
 	if (ret != SQLITE_OK) {
 		printf("Failed to create count query\n");
 		sqlite3_finalize(count);
@@ -1075,7 +1155,7 @@ void ensure_tiles_table(sqlite3 *db) {
 	}
 	sqlite3_finalize(bt);
 
-	printf("%u Running initial tile db init...\n", (unsigned)time(NULL));
+	logr("Running initial tile db init...\n");
 	sqlite3_stmt *insert;
 	ret = sqlite3_prepare_v2(db, "INSERT INTO tiles (X, Y, colorID, lastModifier, placeTime) VALUES (?, ?, 3, \"\", 0)", -1, &insert, NULL);
 	if (ret != SQLITE_OK) printf("Failed to prepare tile insert: %s\n", sqlite3_errmsg(db));
@@ -1110,72 +1190,22 @@ void ensure_tiles_table(sqlite3 *db) {
 	}
 	sqlite3_finalize(et);
 
-	printf("%u db init done.\n", (unsigned)time(NULL));
-}
-
-void ensure_users_table(sqlite3 *db) {
-	sqlite3_stmt *query;
-	char *schema =
-				"CREATE TABLE IF NOT EXISTS `users` ("
-  				"`id` integer  NOT NULL PRIMARY KEY AUTOINCREMENT"
-				",  `username` varchar(255) NOT NULL"
-				",  `uuid` varchar(255) NOT NULL"
-				",  `remainingTiles` integer NOT NULL"
-				",  `tileRegenSeconds` integer NOT NULL"
-				",  `totalTilesPlaced` integer NOT NULL"
-				",  `lastConnected` integer NOT NULL"
-				",  `availableColors` varchar(255) NOT NULL"
-				",  `level` integer NOT NULL"
-				",  `hasSetUsername` integer  NOT NULL"
-				",  `isShadowBanned` integer  NOT NULL"
-				",  `maxTiles` integer NOT NULL"
-				",  `tilesToNextLevel` integer NOT NULL"
-				",  `levelProgress` integer NOT NULL"
-				",  `cl_last_event_sec` integer not null"
-				",  `cl_last_event_usec` integer not null"
-				",  `cl_current_allowance` real not null"
-				",  `cl_max_rate` real not null"
-				",  `cl_per_seconds` real not null"
-				",  `tl_last_event_sec` integer not null"
-				",  `tl_last_event_usec` integer not null"
-				",  `tl_current_allowance` real not null"
-				",  `tl_max_rate` real not null"
-				",  `tl_per_seconds` real not null"
-				")";
-	sqlite3_prepare_v2(db, schema, -1, &query, NULL);
-	int ret = sqlite3_step(query);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to create users table: %s\n", sqlite3_errmsg(db));
-		sqlite3_finalize(query);
-		sqlite3_close(db);
-		exit(-1);
-	}
-	sqlite3_finalize(query);
-}
-
-void ensure_hosts_table(sqlite3 *db) {
-	sqlite3_stmt *query;
-	char *schema =
-				"CREATE TABLE IF NOT EXISTS `hosts` ("
-  				"   `id` integer  NOT NULL PRIMARY KEY AUTOINCREMENT"
-				",  `ip_address` integer NOT NULL"
-				",  `total_accounts` integer NOT NULL"
-				")";
-	sqlite3_prepare_v2(db, schema, -1, &query, NULL);
-	int ret = sqlite3_step(query);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to create users table: %s\n", sqlite3_errmsg(db));
-		sqlite3_finalize(query);
-		sqlite3_close(db);
-		exit(-1);
-	}
-	sqlite3_finalize(query);
+	logr("db init done.\n");
 }
 
 void ensure_valid_db(sqlite3 *db) {
-	ensure_tiles_table(db);
-	ensure_users_table(db);
-	ensure_hosts_table(db);
+	char *schema = load_file("nmc2.sql", NULL);
+	if (!schema) {
+		exit(-1);
+	}
+	int ret = sqlite3_exec(db, schema, NULL, NULL, NULL);
+	if (ret == SQLITE_ABORT) {
+		printf("Failed to create database, check schema file. Error: %s\n", sqlite3_errmsg(db));
+		sqlite3_close(db);
+		exit(-1);
+	}
+	free(schema);
+	ensure_tiles_table(db); // Generate canvas if needed
 }
 
 bool load_tiles(struct canvas *c) {
@@ -1198,7 +1228,7 @@ bool load_tiles(struct canvas *c) {
 	c->edge_length = sqrt(rows);
 	sqlite3_finalize(count_query);
 
-	g_canvas.tiles = calloc(g_canvas.edge_length * g_canvas.edge_length, 1);
+	g_canvas.tiles = calloc(g_canvas.edge_length * g_canvas.edge_length, sizeof(struct tile));
 	g_canvas.connected_users = LIST_INITIALIZER;
 	g_canvas.connected_hosts = LIST_INITIALIZER;
 	printf("Loading %ux%u canvas...\n", c->edge_length, c->edge_length);
@@ -1207,15 +1237,16 @@ bool load_tiles(struct canvas *c) {
 	sqlite3_prepare_v2(c->backing_db, "select * from tiles", -1, &query, NULL);
 
 	while (sqlite3_step(query) != SQLITE_DONE) {
-		size_t x = sqlite3_column_int(query, 1);
-		size_t y = sqlite3_column_int(query, 2);
-		size_t id = sqlite3_column_int(query, 3);
-		//FIXME: Figure out if we care about these two anymore
-		//char *last_modifier = sqlite3_column_text(query, 4);
-		//uint64_t place_time = sqlite3_column_int64(query, 5);
-		g_canvas.tiles[x + y * g_canvas.edge_length] = id;
+		int idx = 1;
+		size_t x = sqlite3_column_int(query, idx++);
+		size_t y = sqlite3_column_int(query, idx++);
+		g_canvas.tiles[x + y * g_canvas.edge_length].color_id = sqlite3_column_int(query, idx++);
+		const char *last_modifier = (const char *)sqlite3_column_text(query, idx++);
+		strncpy(g_canvas.tiles[x + y * g_canvas.edge_length].last_modifier, last_modifier, MAX_NICK_LEN);
+		g_canvas.tiles[x + y * g_canvas.edge_length].place_time_unix = sqlite3_column_int64(query, idx++);
 	}
 	sqlite3_finalize(query);
+	g_canvas.dirty = false;
 	return false;
 }
 
@@ -1287,18 +1318,27 @@ int main(void) {
 	struct mg_mgr mgr;
 	mg_mgr_init(&mgr);
 	//ws ping loop. TODO: Probably do this from the client side instead.
-	mg_timer_init(&g_canvas.ws_ping_timer, 25000, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
+	mg_timer_init(&g_canvas.ws_ping_timer, 1000 * WEBSOCKET_PING_INTERVAL_SEC, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
+	mg_timer_init(&g_canvas.canvas_save_timer, 1000 * CANVAS_SAVE_INTERVAL_SEC, MG_TIMER_REPEAT, canvas_save_timer_fn, &mgr);
 	printf("Starting WS listener on %s/ws\n", s_listen_on);
 	mg_http_listen(&mgr, s_listen_on, callback_fn, NULL);
 	while (g_running) mg_mgr_poll(&mgr, 1000);
+
+	cJSON *payload_array = cJSON_CreateArray();
+	cJSON *payload = base_response("disconnecting");
+	cJSON_InsertItemInArray(payload_array, 0, payload);
+	broadcast(payload_array);
+	cJSON_Delete(payload_array);
+	//drop_all_connections();
+
+	//FIXME: Hack. Just flush some events before closing
+	for (size_t i = 0; i < 100; ++i) {
+		mg_mgr_poll(&mgr, 1);
+	}
+
 	printf("Closing db\n");
 	mg_mgr_free(&mgr);
 	free(g_canvas.tiles);
-	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
-		struct user *user = elem->thing;
-		free(user->user_name);
-	}
 	list_destroy(g_canvas.connected_users);
 	list_destroy(g_canvas.connected_hosts);
 	sqlite3_close(g_canvas.backing_db);
