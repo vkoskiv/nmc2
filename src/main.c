@@ -884,7 +884,6 @@ cJSON *broadcast_announcement(const char *message) {
 }
 
 void drop_user_with_connection(struct mg_connection *c) {
-	logr("drop_user_with_connection: %lu\n", list_elems(&g_canvas.connected_users));
 	struct list_elem *elem = NULL;
 	list_foreach(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
