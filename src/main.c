@@ -347,10 +347,12 @@ cJSON *base_response(const char *type) {
 }
 
 cJSON *error_response(char *error_message) {
+	cJSON *payload_array = cJSON_CreateArray();
 	cJSON *error = cJSON_CreateObject();
 	cJSON_AddStringToObject(error, "responseType", "error");
 	cJSON_AddStringToObject(error, "errorMessage", error_message);
-	return error;
+	cJSON_InsertItemInArray(payload_array, 0, error);
+	return payload_array;
 }
 
 void save_host(const struct remote_host *host) {
