@@ -801,9 +801,6 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (!user) return error_response("Not authenticated");
 	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
 
-	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
-	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
-
 	//Another ugly detail, the client sends the colorID number as a string...
 	uintmax_t num = strtoumax(color_id_param->valuestring, NULL, 10);
 	if (num == UINTMAX_MAX && errno == ERANGE) return error_response("colorID not a valid number in a string");
@@ -815,6 +812,9 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
 	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
+
+	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
+	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
 	
 	user->remaining_tiles--;
 	user->total_tiles_placed++;
