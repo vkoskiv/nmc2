@@ -813,7 +813,10 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
 	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
 
-	if (user->is_shadow_banned) return new_tile_update(x, y, color_id);
+	if (user->is_shadow_banned) {
+		logr("Rejecting request from shadowbanned user: %.*s\n", (int)raw_request_length, raw_request);
+		return new_tile_update(x, y, color_id);
+	}
 
 	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
 	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
