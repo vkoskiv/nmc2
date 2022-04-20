@@ -794,6 +794,8 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 
+	if (user->is_shadow_banned) return error_response("Rate limit exceeded");
+
 	if (!is_within_rate_limit(&user->tile_limiter)) {
 		return error_response("Rate limit exceeded");
 	}
