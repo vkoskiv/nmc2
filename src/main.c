@@ -794,8 +794,6 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 
-	if (user->is_shadow_banned) return new_tile_update(x, y, color_id);
-
 	if (!is_within_rate_limit(&user->tile_limiter)) {
 		return error_response("Rate limit exceeded");
 	}
@@ -814,6 +812,8 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
 	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
+
+	if (user->is_shadow_banned) return new_tile_update(x, y, color_id);
 
 	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
 	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
