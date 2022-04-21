@@ -1020,6 +1020,16 @@ cJSON *shut_down_server(void) {
 	return NULL;
 }
 
+cJSON *shadow_ban_user(const char *uuid) {
+	struct user *user = check_and_fetch_user(uuid);
+	if (!user) user = try_load_user(uuid);
+	if (!user) return error_response("No user found with that uuid");
+	logr("Toggling is_shadow_banned to %s for user %s\n", !user->is_shadow_banned ? "true " : "false", uuid);
+	user->is_shadow_banned = !user->is_shadow_banned;
+	save_user(user);
+	return base_response("Success");
+}
+
 cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	if (!cJSON_IsString(user_id)) return error_response("No valid userID provided");
 	if (!str_eq(user_id->valuestring, g_canvas.settings.admin_uuid)) return error_response("Invalid userID");	
@@ -1029,6 +1039,7 @@ cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	if (!cJSON_IsString(action)) return error_response("Invalid command action");
 	if (str_eq(action->valuestring, "shutdown")) return shut_down_server();
 	if (str_eq(action->valuestring, "message")) return broadcast_announcement(message->valuestring);
+	if (str_eq(action->valuestring, "toggle_shadowban")) return shadow_ban_user(message->valuestring);
 	return NULL;
 }
 
