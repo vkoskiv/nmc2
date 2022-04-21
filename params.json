@@ -1,0 +1,11 @@
+{
+	"new_db_canvas_size": 512,
+	"getcanvas_max_rate": 1.0,
+	"getcanvas_per_seconds": 10.0,
+	"setpixel_max_rate": 5.0,
+	"setpixel_per_seconds": 1.0,
+	"max_users_per_ip": 64,
+	"canvas_save_interval_sec": 60,
+	"websocket_ping_interval_sec": 25,
+	"admin_uuid": "<Desired userID here>"
+}

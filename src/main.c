@@ -26,32 +26,8 @@ struct color {
 
 void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 
-// config
-
-// We default to the canvas size found in an existing db.
-// If the db is new, we fall back to this value and create
-// it based on that.
-#define NEW_DB_CANVAS_SIZE 512
-
-// Substitute before deploying
-#define ADMIN_USER_ID "<Desired userID here>"
-
-// Same deal for getCanvas
-#define MAX_GETCANVAS_RATE 1.0f
-#define PER_SECONDS_GETCANVAS 10.0f
-
-#define MAX_SETPIXEL_RATE 5.0f
-#define PER_SECONDS_SETPIXEL 1.0f
-
-// And also cap the total amount of user IDs for a given IP
-#define MAX_USERS_PER_IP 64
-
+// Compile-time constants
 #define MAX_NICK_LEN 64
-
-#define CANVAS_SAVE_INTERVAL_SEC 60
-#define WEBSOCKET_PING_INTERVAL_SEC 25
-
-// end config
 
 // These come from the original implementation here:
 // https://github.com/vkoskiv/NoMansCanvas
@@ -211,6 +187,18 @@ struct tile {
 	char last_modifier[MAX_NICK_LEN];
 };
 
+struct params {
+	size_t new_db_canvas_size;
+	float getcanvas_max_rate;
+	float getcanvas_per_seconds;
+	float setpixel_max_rate;
+	float setpixel_per_seconds;
+	size_t max_users_per_ip;
+	size_t canvas_save_interval_sec;
+	size_t websocket_ping_interval_sec;
+	char admin_uuid[UUID_STR_LEN];
+};
+
 struct canvas {
 	struct list connected_users;
 	struct list connected_hosts;
@@ -220,6 +208,7 @@ struct canvas {
 	struct mg_timer ws_ping_timer;
 	struct mg_timer canvas_save_timer;
 	sqlite3 *backing_db; // For persistence
+	struct params settings;
 };
 
 // rate limiting
@@ -305,6 +294,106 @@ char *load_file(const char *file_path, size_t *bytes) {
 	fclose(file);
 	if (bytes) *bytes = read_bytes;
 	return buf;
+}
+
+void load_config(struct canvas *c) {
+	size_t file_bytes;
+	char *conf = load_file("params.json", &file_bytes);
+	if (!conf) {
+		logr("params.json not found, exiting.\n");
+		goto bail;
+	}
+	cJSON *config = cJSON_ParseWithLength(conf, file_bytes);
+	if (!config) {
+		logr("Failed to load params.json contents, exiting.\n");
+		logr("Error before: %s\n", cJSON_GetErrorPtr());
+		goto bail;
+	}
+	const cJSON *canvas_size = cJSON_GetObjectItem(config, "new_db_canvas_size");
+	if (!cJSON_IsNumber(canvas_size)) {
+		logr("new_db_canvas_size not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *gc_maxrate  = cJSON_GetObjectItem(config, "getcanvas_max_rate");
+	if (!cJSON_IsNumber(gc_maxrate)) {
+		logr("getcanvas_max_rate not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *gc_persecs  = cJSON_GetObjectItem(config, "getcanvas_per_seconds");
+	if (!cJSON_IsNumber(gc_persecs)) {
+		logr("getcanvas_per_seconds not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *sp_maxrate  = cJSON_GetObjectItem(config, "setpixel_max_rate");
+	if (!cJSON_IsNumber(sp_maxrate)) {
+		logr("setpixel_max_rate not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *sp_persecs  = cJSON_GetObjectItem(config, "setpixel_per_seconds");
+	if (!cJSON_IsNumber(sp_persecs)) {
+		logr("setpixel_per_seconds not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *max_users   = cJSON_GetObjectItem(config, "max_users_per_ip");
+	if (!cJSON_IsNumber(max_users)) {
+		logr("max_users_per_ip not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *cs_interval = cJSON_GetObjectItem(config, "canvas_save_interval_sec");
+	if (!cJSON_IsNumber(cs_interval)) {
+		logr("canvas_save_interval_sec not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *wp_interval = cJSON_GetObjectItem(config, "websocket_ping_interval_sec");
+	if (!cJSON_IsNumber(wp_interval)) {
+		logr("websocket_ping_interval_sec not a number, exiting.\n");
+		goto bail;
+	}
+	const cJSON *admin_uuid  = cJSON_GetObjectItem(config, "admin_uuid");
+	if (!cJSON_IsString(admin_uuid)) {
+		logr("admin_uuid not a string, exiting.\n");
+		goto bail;
+	}
+
+	c->settings.new_db_canvas_size = canvas_size->valueint;
+	c->settings.getcanvas_max_rate = gc_maxrate->valuedouble;
+	c->settings.getcanvas_per_seconds = gc_persecs->valuedouble;
+	c->settings.setpixel_max_rate = sp_maxrate->valuedouble;
+	c->settings.setpixel_per_seconds = sp_persecs->valuedouble;
+	c->settings.max_users_per_ip = max_users->valueint;
+	c->settings.canvas_save_interval_sec = cs_interval->valueint;
+	c->settings.websocket_ping_interval_sec = wp_interval->valueint;
+	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid));
+
+	cJSON_Delete(config);
+	free(conf);
+	logr(
+	"Loaded conf:\n{\n"
+	"\t\"new_db_canvas_size\": %lu,\n"
+	"\t\"getcanvas_max_rate\": %.2f,\n"
+	"\t\"getcanvas_per_seconds\": %.2f,\n"
+	"\t\"setpixel_max_rate\": %.2f,\n"
+	"\t\"setpixel_per_seconds\": %.2f,\n"
+	"\t\"max_users_per_ip\": %lu,\n"
+	"\t\"canvas_save_interval_sec\": %lu,\n"
+	"\t\"websocket_ping_interval_sec\": %lu,\n"
+	"\t\"admin_uuid\": %.*s,\n"
+	"}\n",
+	c->settings.new_db_canvas_size,
+	c->settings.getcanvas_max_rate,
+	c->settings.getcanvas_per_seconds,
+	c->settings.setpixel_max_rate,
+	c->settings.setpixel_per_seconds,
+	c->settings.max_users_per_ip,
+	c->settings.canvas_save_interval_sec,
+	c->settings.websocket_ping_interval_sec,
+	(int)sizeof(c->settings.admin_uuid),
+	c->settings.admin_uuid
+	);
+	return;
+bail:
+	if (c->backing_db) sqlite3_close(c->backing_db);
+	exit(-1);
 }
 
 void generate_uuid(char *buf) {
@@ -659,10 +748,10 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 
 	host->total_accounts++;
 	save_host(host);
-	if (host->total_accounts >= MAX_USERS_PER_IP) {
+	if (host->total_accounts >= g_canvas.settings.max_users_per_ip) {
 		char ip_buf[50];
 		mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
-		logr("Rejecting initialAuth from %s, reached maximum of %i users\n", ip_buf, MAX_USERS_PER_IP);
+		logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, g_canvas.settings.max_users_per_ip);
 		return error_response("Maximum users reached for this IP (contact vkoskiv if you think this is an issue)");
 	}
 
@@ -686,8 +775,8 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	uptr->socket = socket;
 
 	// Set up rate limiting
-	init_rate_limiter(&uptr->canvas_limiter, MAX_GETCANVAS_RATE, PER_SECONDS_GETCANVAS);
-	init_rate_limiter(&uptr->tile_limiter, MAX_SETPIXEL_RATE, PER_SECONDS_SETPIXEL);
+	init_rate_limiter(&uptr->canvas_limiter, g_canvas.settings.getcanvas_max_rate, g_canvas.settings.getcanvas_per_seconds);
+	init_rate_limiter(&uptr->tile_limiter, g_canvas.settings.setpixel_max_rate, g_canvas.settings.setpixel_per_seconds);
 	save_user(uptr);
 
 	start_user_timer(uptr, socket->mgr);
@@ -933,7 +1022,7 @@ cJSON *shut_down_server(void) {
 
 cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	if (!cJSON_IsString(user_id)) return error_response("No valid userID provided");
-	if (!str_eq(user_id->valuestring, ADMIN_USER_ID)) return error_response("Invalid userID");	
+	if (!str_eq(user_id->valuestring, g_canvas.settings.admin_uuid)) return error_response("Invalid userID");	
 	if (!cJSON_IsObject(command)) return error_response("No valid command object provided");
 	const cJSON *action = cJSON_GetObjectItem(command, "action");	
 	const cJSON *message = cJSON_GetObjectItem(command, "message");
@@ -1167,8 +1256,8 @@ void ensure_tiles_table(sqlite3 *db) {
 	ret = sqlite3_prepare_v2(db, "INSERT INTO tiles (X, Y, colorID, lastModifier, placeTime) VALUES (?, ?, 3, \"\", 0)", -1, &insert, NULL);
 	if (ret != SQLITE_OK) printf("Failed to prepare tile insert: %s\n", sqlite3_errmsg(db));
 
-	for (size_t y = 0; y < NEW_DB_CANVAS_SIZE; ++y) {
-		for (size_t x = 0; x < NEW_DB_CANVAS_SIZE; ++x) {
+	for (size_t y = 0; y < g_canvas.settings.new_db_canvas_size; ++y) {
+		for (size_t x = 0; x < g_canvas.settings.new_db_canvas_size; ++x) {
 			ret = sqlite3_bind_int(insert, 1, x);
 			if (ret != SQLITE_OK) printf("Failed to bind x: %s\n", sqlite3_errmsg(db));
 			ret = sqlite3_bind_int(insert, 2, y);
@@ -1306,9 +1395,13 @@ void logr(const char *fmt, ...) {
 
 int main(void) {
 	setbuf(stdout, NULL); // Disable output buffering
-	if (str_eq(ADMIN_USER_ID, "<Desired userID here>")) {
+
+	g_canvas = (struct canvas){ 0 };
+	load_config(&g_canvas);
+
+	if (str_eq(g_canvas.settings.admin_uuid, "<Desired userID here>")) {
 		logr("Warning - Admin UUID still at default, anyone can shut down this server.\n");
-		logr("Substitute ADMIN_USER_ID in main.c with your desired UUID before running.\n");
+		logr("Substitute admin_uuid in params.json with your desired UUID before running.\n");
 		exit(-1);
 	}
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
@@ -1327,8 +1420,8 @@ int main(void) {
 	struct mg_mgr mgr;
 	mg_mgr_init(&mgr);
 	//ws ping loop. TODO: Probably do this from the client side instead.
-	mg_timer_init(&g_canvas.ws_ping_timer, 1000 * WEBSOCKET_PING_INTERVAL_SEC, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
-	mg_timer_init(&g_canvas.canvas_save_timer, 1000 * CANVAS_SAVE_INTERVAL_SEC, MG_TIMER_REPEAT, canvas_save_timer_fn, &mgr);
+	mg_timer_init(&g_canvas.ws_ping_timer, 1000 * g_canvas.settings.websocket_ping_interval_sec, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
+	mg_timer_init(&g_canvas.canvas_save_timer, 1000 * g_canvas.settings.canvas_save_interval_sec, MG_TIMER_REPEAT, canvas_save_timer_fn, &mgr);
 	printf("Starting WS listener on %s/ws\n", s_listen_on);
 	mg_http_listen(&mgr, s_listen_on, callback_fn, NULL);
 	while (g_running) mg_mgr_poll(&mgr, 1000);
