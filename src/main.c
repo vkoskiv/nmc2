@@ -1378,6 +1378,13 @@ void sigint_handler(int sig) {
 	}
 }
 
+void sigusr1_handler(int sig) {
+	if (sig == SIGUSR1) {
+		printf("Reeived SIGUSR1, reloading config...\n");
+		load_config(&g_canvas);
+	}
+}
+
 void logr(const char *fmt, ...) {
 	if (!fmt) return;
 	printf("%u ", (unsigned)time(NULL));
@@ -1410,6 +1417,10 @@ int main(void) {
 	}
 	if (signal(SIGTERM, sigint_handler) == SIG_ERR) {
 		printf("Failed to register sigterm handler\n");
+		return -1;
+	}
+	if (signal(SIGUSR1, sigusr1_handler) == SIG_ERR) {
+		printf("Failed to register SIGUSR1 handler\n");
 		return -1;
 	}
 	printf("Using SQLite v%s\n", sqlite3_libversion());
