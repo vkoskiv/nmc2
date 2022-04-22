@@ -1079,8 +1079,6 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	const cJSON *request_type = cJSON_GetObjectItem(command, "requestType");
 	if (!cJSON_IsString(request_type)) return error_response("No requestType provided");
 
-	struct remote_host *host = find_host(connection->peer);
-	
 	const cJSON *user_id   = cJSON_GetObjectItem(command, "userID");
 	const cJSON *name      = cJSON_GetObjectItem(command, "name");
 	const cJSON *x         = cJSON_GetObjectItem(command, "X");
@@ -1091,6 +1089,7 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 
 	cJSON *response = NULL;
 	if (str_eq(reqstr, "initialAuth")) {
+		struct remote_host *host = find_host(connection->peer);
 		response = handle_initial_auth(connection, host);
 	} else if (str_eq(reqstr, "auth")) {
 		response = handle_auth(user_id, connection);
