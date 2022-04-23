@@ -16,6 +16,7 @@
 #include <time.h>
 #include <math.h>
 #include <signal.h>
+#include <zlib.h>
 
 struct color {
 	uint8_t red;
@@ -152,6 +153,103 @@ void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
 #define list_foreach(element, list) for (element = list.first; list.first && element; element = element->next)
 
 // end linked list
+
+// stolen, fast b64 enc/dec
+
+// Neither of these implementations are mine, but they are
+// way faster than anything I could come up with, so we're using
+// them here.
+
+/*
+ * Base64 encoding/decoding (RFC1341)
+ * Copyright (c) 2005-2011, Jouni Malinen <j@w1.fi>
+ *
+ * This software may be distributed under the terms of the BSD license.
+ * See README for more details.
+ */
+
+// Ported to C here, lifted from:
+// https://stackoverflow.com/questions/342409/how-do-i-base64-encode-decode-in-c
+
+static const unsigned char base64_table[65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+char *b64encode(const void *input, const size_t dataLength) {
+	unsigned char *out, *pos;
+	const unsigned char *end, *in;
+	const unsigned char *data = (const unsigned char *)input;
+	size_t outputLength = 4 * ((dataLength + 2) / 3); // 3-byte blocks to 4-byte
+	if (outputLength < dataLength)
+		return NULL; // integer overflow
+	char *outStr = calloc(outputLength + 1, sizeof(*outStr));
+	out = (unsigned char *)&outStr[0];
+	end = data + dataLength;
+	in = data;
+	pos = out;
+	while (end - in >= 3) {
+		*pos++ = base64_table[in[0] >> 2];
+		*pos++ = base64_table[((in[0] & 0x03) << 4) | (in[1] >> 4)];
+		*pos++ = base64_table[((in[1] & 0x0f) << 2) | (in[2] >> 6)];
+		*pos++ = base64_table[in[2] & 0x3f];
+		in += 3;
+	}
+	if (end - in) {
+		*pos++ = base64_table[in[0] >> 2];
+		if (end - in == 1) {
+			*pos++ = base64_table[(in[0] & 0x03) << 4];
+			*pos++ = '=';
+		} else {
+			*pos++ = base64_table[((in[0] & 0x03) << 4) | (in[1] >> 4)];
+			*pos++ = base64_table[(in[1] & 0x0f) << 2];
+		}
+		*pos++ = '=';
+	}
+	return outStr;
+}
+
+// Decoder ported to C from SO user Polfosol's implementation here:
+// https://stackoverflow.com/questions/180947/base64-decode-snippet-in-c/13935718
+// License unknown
+
+static const int B64index[256] = {
+	0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+	0,0,0,0,0,0,0,0,0,0,0,62,63,62,62,63,52,53,54,55,
+	56,57,58,59,60,61,0,0,0,0,0,0,0,0,1,2,3,4,5,6,
+	7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,
+	0,0,0,63,0,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+	41,42,43,44,45,46,47,48,49,50,51
+};
+
+void *b64decode(const char *data, const size_t inputLength, size_t *outLength) {
+	if (!inputLength) return "";
+	unsigned char *p = (unsigned char *)data;
+	const size_t pad1 = inputLength % 4 || p[inputLength - 1] == '=';
+	const size_t pad2 = pad1 && (inputLength % 4 > 2 || p[inputLength - 2] != '=');
+	const size_t L = (inputLength - pad1) / 4 << 2;
+	const size_t strSize = L / 4 * 3 + pad1 + pad2;
+	char *str = calloc(strSize + 1, sizeof(*str));
+	size_t j = 0;
+	for (size_t i = 0; i < L; i += 4) {
+		int n = B64index[p[i]] << 18 | B64index[p[i + 1]] << 12 | B64index[p[i + 2]] << 6 | B64index[p[i + 3]];
+		str[j++] = n >> 16;
+		str[j++] = n >> 8 & 0xFF;
+		str[j++] = n & 0xFF;
+	}
+	if (pad1) {
+		int n = B64index[p[L]] << 18 | B64index[p[L + 1]] << 12;
+		str[j++] = n >> 16;
+		
+		if (pad2) {
+			n |= B64index[p[L + 2]] << 6;
+			str[j++] = n >> 8 & 0xFF;
+		}
+	}
+	if (outLength) *outLength = strSize;
+	str[strSize] = 0;
+	return str;
+}
+
+// end b64
 
 struct rate_limiter {
 	struct timeval last_event_time;
@@ -296,6 +394,7 @@ char *load_file(const char *file_path, size_t *bytes) {
 	return buf;
 }
 
+//TODO: Restart timers when those change
 void load_config(struct canvas *c) {
 	size_t file_bytes;
 	char *conf = load_file("params.json", &file_bytes);
@@ -844,7 +943,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	return response_array;
 }
 
-cJSON *handle_get_canvas(const cJSON *user_id) {
+cJSON *handle_get_canvas(const cJSON *user_id, bool binary) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
@@ -855,16 +954,51 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 		logr("CANVAS rate limit exceeded\n");
 		return error_response("Rate limit exceeded");
 	}
+	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
+	if (binary) {
+		struct timeval tmr;
+		gettimeofday(&tmr, NULL);
+		uint8_t *pixels = calloc(tilecount, 1);
+		for (size_t i = 0; i < tilecount; ++i) {
+			pixels[i] = g_canvas.tiles[i].color_id;
+		}
 
-	cJSON *canvas_array = cJSON_CreateArray();
-	cJSON *response = base_response("fullCanvas");
-	cJSON_InsertItemInArray(canvas_array, 0, response);
-	size_t tiles = g_canvas.edge_length * g_canvas.edge_length;
-	for (size_t i = 0; i < tiles; ++i) {
-		cJSON_AddItemToArray(canvas_array, cJSON_CreateNumber(g_canvas.tiles[i].color_id));
+		size_t compressed_len = compressBound(tilecount);
+		uint8_t *compressed = malloc(compressed_len);
+		int ret = compress(compressed, &compressed_len, pixels, tilecount);
+		if (ret != Z_OK) {
+			if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
+			if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
+		}
+
+		char *zlib_b64_encoded = b64encode(compressed, compressed_len);
+		cJSON *response_wrapper = cJSON_CreateArray();
+		cJSON *response = base_response("fullCanvasZlib");
+		cJSON_InsertItemInArray(response_wrapper, 0, response);
+		
+		cJSON *content = cJSON_CreateString(zlib_b64_encoded);
+		cJSON_InsertItemInArray(response_wrapper, 1, content);
+		free(pixels);
+		free(zlib_b64_encoded);
+		free(compressed);
+		long ms = get_ms_delta(tmr);
+		logr("Sending zlib'd canvas to %s. (%lums)\n", user->uuid, ms);
+		return response_wrapper;
+	} else {
+		struct timeval tmr;
+		gettimeofday(&tmr, NULL);
+		cJSON *canvas_array = cJSON_CreateArray();
+		cJSON *response = base_response("fullCanvas");
+		cJSON_InsertItemInArray(canvas_array, 0, response);
+		for (size_t i = 0; i < tilecount; ++i) {
+			cJSON_AddItemToArray(canvas_array, cJSON_CreateNumber(g_canvas.tiles[i].color_id));
+		}
+		long ms = get_ms_delta(tmr);
+		logr("Sending canvas to %s. (%lums)\n", user->uuid, ms);
+		return canvas_array;
 	}
-	logr("Serving canvas to %s\n", user->uuid);
-	return canvas_array;
+
+	return NULL;
 }
 
 cJSON *new_tile_update(size_t x, size_t y, size_t color_id) {
@@ -1094,7 +1228,9 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	} else if (str_eq(reqstr, "auth")) {
 		response = handle_auth(user_id, connection);
 	} else if (str_eq(reqstr, "getCanvas")) {
-		response = handle_get_canvas(user_id);
+		response = handle_get_canvas(user_id, false);
+	} else if (str_eq(reqstr, "getCanvasBin")) {
+		response = handle_get_canvas(user_id, true);
 	} else if (str_eq(reqstr, "postTile")) {
 		response = handle_post_tile(user_id, x, y, color_id, cmd, len);
 	} else if (str_eq(reqstr, "getColors")) {
