@@ -363,7 +363,7 @@ void load_config(struct canvas *c) {
 	c->settings.max_users_per_ip = max_users->valueint;
 	c->settings.canvas_save_interval_sec = cs_interval->valueint;
 	c->settings.websocket_ping_interval_sec = wp_interval->valueint;
-	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid));
+	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid) - 1);
 
 	cJSON_Delete(config);
 	free(conf);
@@ -659,7 +659,7 @@ struct user *try_load_user(const char *uuid) {
 		size_t i = 1;
 		user = calloc(1, sizeof(*user));
 		const char *user_name = (const char *)sqlite3_column_text(query, i++);
-		strncpy(user->user_name, user_name, sizeof(user->user_name));
+		strncpy(user->user_name, user_name, sizeof(user->user_name) - 1);
 		const char *uuid = (const char *)sqlite3_column_text(query, i++);
 		strncpy(user->uuid, uuid, UUID_STR_LEN);
 		user->remaining_tiles = sqlite3_column_int(query, i++);
@@ -965,7 +965,7 @@ cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
 	if (!user) return error_response("Not authenticated");
 	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
 	logr("User %s set their username to %s\n", user_id->valuestring, name->valuestring);
-	strncpy(user->user_name, name->valuestring, sizeof(user->user_name));
+	strncpy(user->user_name, name->valuestring, sizeof(user->user_name) - 1);
 	save_user(user);
 	return base_response("nameSetSuccess");
 }
@@ -1221,7 +1221,7 @@ bail:
 	} else {
 		struct timeval timer_end;
 		gettimeofday(&timer_end, NULL);
-		long ms = 1000 * (timer_end.tv_sec - timer.tv_sec) + ((timer_end.tv_usec - timer.tv_usec) / 1000);
+		long ms = get_ms_delta(timer);
 		logr("Done, that took %lims\n", ms);
 		g_canvas.dirty = false;
 	}
@@ -1348,7 +1348,7 @@ bool load_tiles(struct canvas *c) {
 		size_t y = sqlite3_column_int(query, idx++);
 		g_canvas.tiles[x + y * g_canvas.edge_length].color_id = sqlite3_column_int(query, idx++);
 		const char *last_modifier = (const char *)sqlite3_column_text(query, idx++);
-		strncpy(g_canvas.tiles[x + y * g_canvas.edge_length].last_modifier, last_modifier, MAX_NICK_LEN);
+		strncpy(g_canvas.tiles[x + y * g_canvas.edge_length].last_modifier, last_modifier, MAX_NICK_LEN - 1);
 		g_canvas.tiles[x + y * g_canvas.edge_length].place_time_unix = sqlite3_column_int64(query, idx++);
 	}
 	sqlite3_finalize(query);
