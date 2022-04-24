@@ -295,6 +295,8 @@ struct params {
 	size_t canvas_save_interval_sec;
 	size_t websocket_ping_interval_sec;
 	char admin_uuid[UUID_STR_LEN];
+	char listen_url[128];
+	char dbase_file[PATH_MAX];
 };
 
 struct canvas {
@@ -354,8 +356,6 @@ void sleep_ms(int ms) {
 
 static struct canvas g_canvas;
 static bool g_running = true;
-
-static const char *s_listen_on = "ws://0.0.0.0:3001";
 
 size_t get_file_size(const char *file_path) {
 	FILE *file = fopen(file_path, "r");
@@ -453,6 +453,16 @@ void load_config(struct canvas *c) {
 		logr("admin_uuid not a string, exiting.\n");
 		goto bail;
 	}
+	const cJSON *listen_url  = cJSON_GetObjectItem(config, "listen_url");
+	if (!cJSON_IsString(listen_url)) {
+		logr("listen_url not a string, exiting.\n");
+		goto bail;
+	}
+	const cJSON *dbase_file = cJSON_GetObjectItem(config, "dbase_file");
+	if (!cJSON_IsString(dbase_file)) {
+		logr("dbase_file not a string, exiting.\n");
+		goto bail;
+	}
 
 	c->settings.new_db_canvas_size = canvas_size->valueint;
 	c->settings.getcanvas_max_rate = gc_maxrate->valuedouble;
@@ -463,6 +473,8 @@ void load_config(struct canvas *c) {
 	c->settings.canvas_save_interval_sec = cs_interval->valueint;
 	c->settings.websocket_ping_interval_sec = wp_interval->valueint;
 	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid) - 1);
+	strncpy(c->settings.listen_url, listen_url->valuestring, sizeof(c->settings.listen_url) - 1);
+	strncpy(c->settings.dbase_file, dbase_file->valuestring, sizeof(c->settings.dbase_file) - 1);
 
 	cJSON_Delete(config);
 	free(conf);
@@ -477,6 +489,8 @@ void load_config(struct canvas *c) {
 	"\t\"canvas_save_interval_sec\": %lu,\n"
 	"\t\"websocket_ping_interval_sec\": %lu,\n"
 	"\t\"admin_uuid\": %.*s,\n"
+	"\t\"listen_url\": %.*s,\n"
+	"\t\"dbase_file\": %.*s,\n"
 	"}\n",
 	c->settings.new_db_canvas_size,
 	c->settings.getcanvas_max_rate,
@@ -486,8 +500,9 @@ void load_config(struct canvas *c) {
 	c->settings.max_users_per_ip,
 	c->settings.canvas_save_interval_sec,
 	c->settings.websocket_ping_interval_sec,
-	(int)sizeof(c->settings.admin_uuid),
-	c->settings.admin_uuid
+	(int)sizeof(c->settings.admin_uuid), c->settings.admin_uuid,
+	(int)sizeof(c->settings.listen_url), c->settings.listen_url,
+	(int)sizeof(c->settings.dbase_file), c->settings.dbase_file
 	);
 	return;
 bail:
@@ -1494,7 +1509,7 @@ bool load_tiles(struct canvas *c) {
 
 bool set_up_db(struct canvas *c) {
 	int ret = 0;
-	ret = sqlite3_open(":memory:", &c->backing_db);
+	ret = sqlite3_open(c->settings.dbase_file, &c->backing_db);
 	if (ret != SQLITE_OK) {
 		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_close(c->backing_db);
@@ -1579,8 +1594,8 @@ int main(void) {
 	//ws ping loop. TODO: Probably do this from the client side instead.
 	mg_timer_init(&g_canvas.ws_ping_timer, 1000 * g_canvas.settings.websocket_ping_interval_sec, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
 	mg_timer_init(&g_canvas.canvas_save_timer, 1000 * g_canvas.settings.canvas_save_interval_sec, MG_TIMER_REPEAT, canvas_save_timer_fn, &mgr);
-	printf("Starting WS listener on %s/ws\n", s_listen_on);
-	mg_http_listen(&mgr, s_listen_on, callback_fn, NULL);
+	printf("Starting WS listener on %s/ws\n", g_canvas.settings.listen_url);
+	mg_http_listen(&mgr, g_canvas.settings.listen_url, callback_fn, NULL);
 	while (g_running) mg_mgr_poll(&mgr, 1000);
 
 	cJSON *payload_array = cJSON_CreateArray();
