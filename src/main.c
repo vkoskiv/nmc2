@@ -1053,9 +1053,6 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
 	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
 
-	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
-	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
-	
 	user->remaining_tiles--;
 	user->total_tiles_placed++;
 	user->current_level_progress++;
@@ -1069,6 +1066,9 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 		return new_tile_update(x, y, color_id);
 	}
 
+	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
+	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
+	
 	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
 	tile->color_id = color_id;
 	tile->place_time_unix = (unsigned)time(NULL);
