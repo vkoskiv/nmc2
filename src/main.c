@@ -60,10 +60,11 @@ void elem_destroy(struct list_elem *elem) {
 	free(elem);
 }
 
-void list_destroy(struct list list) {
-	if (!list.first) return;
-	struct list_elem *head = list.first;
+void list_destroy(struct list *list) {
+	if (!list->first) return;
+	struct list_elem *head = list->first;
 	if (head) elem_destroy(head);
+	list->first = NULL;
 }
 
 bool list_empty(struct list *list) {
@@ -283,9 +284,16 @@ struct color_list {
 	size_t amount;
 };
 
+struct tile_placement {
+	size_t x;
+	size_t y;
+	struct tile tile;
+};
+
 struct canvas {
 	struct list connected_users;
 	struct list connected_hosts;
+	struct list delta;
 	struct tile *tiles;
 	bool dirty;
 	uint32_t edge_length;
@@ -1115,7 +1123,17 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
 	tile->color_id = color_id;
 	tile->place_time_unix = (unsigned)time(NULL);
+	//FIXME: This should be the uuid, *not* username!
 	strncpy(tile->last_modifier, user->user_name, sizeof(tile->last_modifier));
+	
+	// Record delta for persistence. These get flushed to disk every canvas_save_interval_sec seconds.
+	struct tile_placement placement = {
+		.x = x,
+		.y = y,
+		.tile = *tile
+	};
+	list_append(g_canvas.delta, placement);
+
 	g_canvas.dirty = true;
 
 	cJSON *update = new_tile_update(x, y, color_id);
@@ -1335,12 +1353,11 @@ static void canvas_save_timer_fn(void *arg) {
 
 	if (!g_canvas.dirty) return;
 
-	sqlite3 *db = g_canvas.backing_db;
-	logr("Saving canvas to disk...\n");
-	
 	struct timeval timer;
 	gettimeofday(&timer, NULL);
 
+	sqlite3 *db = g_canvas.backing_db;
+	
 	sqlite3_stmt *bt;
 	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
 	int ret = sqlite3_step(bt);
@@ -1359,35 +1376,40 @@ static void canvas_save_timer_fn(void *arg) {
 		goto bail;
 	}
 
-	for (size_t y = 0; y < g_canvas.edge_length; ++y) {
-		for (size_t x = 0; x < g_canvas.edge_length; ++x) {
-			int idx = 1;
-			struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
-			ret = sqlite3_bind_int(insert, idx++, tile->color_id);
-			if (ret != SQLITE_OK) printf("Failed to bind colorID: %s\n", sqlite3_errmsg(db));
-			ret = sqlite3_bind_text(insert, idx++, tile->last_modifier, sizeof(tile->last_modifier), NULL);
-			if (ret != SQLITE_OK) printf("Failed to bind lastModifier: %s\n", sqlite3_errmsg(db));
-			ret = sqlite3_bind_int64(insert, idx++, tile->place_time_unix);
-			if (ret != SQLITE_OK) printf("Failed to bind placeTime: %s\n", sqlite3_errmsg(db));
-			ret = sqlite3_bind_int(insert, idx++, x);
-			if (ret != SQLITE_OK) printf("Failed to bind X: %s\n", sqlite3_errmsg(db));
-			ret = sqlite3_bind_int(insert, idx++, y);
-			if (ret != SQLITE_OK) printf("Failed to bind Y: %s\n", sqlite3_errmsg(db));
+	logr("Saving canvas to disk (%li events) ", list_elems(&g_canvas.delta));
 
-			int res = sqlite3_step(insert);
-			if (res != SQLITE_DONE) {
-				printf("Failed to UPDATE for x = %lu, y = %lu\n", x, y);
-				sqlite3_finalize(insert);
-				sqlite3_close(db);
-				exit(-1);
-			}
-			sqlite3_clear_bindings(insert);
-			sqlite3_reset(insert);
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.delta) {
+		struct tile_placement *p = (struct tile_placement *)elem->thing;
+		int idx = 1;
+		struct tile *tile = &p->tile;
+		ret = sqlite3_bind_int(insert, idx++, tile->color_id);
+		if (ret != SQLITE_OK) printf("Failed to bind colorID: %s\n", sqlite3_errmsg(db));
+		ret = sqlite3_bind_text(insert, idx++, tile->last_modifier, sizeof(tile->last_modifier), NULL);
+		if (ret != SQLITE_OK) printf("Failed to bind lastModifier: %s\n", sqlite3_errmsg(db));
+		ret = sqlite3_bind_int64(insert, idx++, tile->place_time_unix);
+		if (ret != SQLITE_OK) printf("Failed to bind placeTime: %s\n", sqlite3_errmsg(db));
+		ret = sqlite3_bind_int(insert, idx++, p->x);
+		if (ret != SQLITE_OK) printf("Failed to bind X: %s\n", sqlite3_errmsg(db));
+		ret = sqlite3_bind_int(insert, idx++, p->y);
+		if (ret != SQLITE_OK) printf("Failed to bind Y: %s\n", sqlite3_errmsg(db));
+
+		int res = sqlite3_step(insert);
+		if (res != SQLITE_DONE) {
+			printf("Failed to UPDATE for x = %lu, y = %lu\n", p->x, p->y);
+			sqlite3_finalize(insert);
+			sqlite3_close(db);
+			exit(-1);
 		}
+		sqlite3_clear_bindings(insert);
+		sqlite3_reset(insert);
 	}
+	list_destroy(&g_canvas.delta);
+
 bail:
 	sqlite3_finalize(insert);
 
+	gettimeofday(&timer, NULL);
 	sqlite3_stmt *et;
 	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
 	ret = sqlite3_step(et);
@@ -1397,10 +1419,8 @@ bail:
 		sqlite3_close(db);
 		exit(-1);
 	} else {
-		struct timeval timer_end;
-		gettimeofday(&timer_end, NULL);
 		long ms = get_ms_delta(timer);
-		logr("Done, that took %lims\n", ms);
+		printf("(%lims)\n", ms);
 		g_canvas.dirty = false;
 	}
 	sqlite3_finalize(et);
@@ -1630,20 +1650,23 @@ int main(void) {
 	cJSON_InsertItemInArray(payload_array, 0, payload);
 	broadcast(payload_array);
 	cJSON_Delete(payload_array);
-	//drop_all_connections();
+	//drop_all_connections(); // Broken
 
 	//FIXME: Hack. Just flush some events before closing
 	for (size_t i = 0; i < 100; ++i) {
 		mg_mgr_poll(&mgr, 1);
 	}
+	logr("Saving canvas one more time...\n");
+	canvas_save_timer_fn(NULL);
 
 	printf("Closing db\n");
 	mg_mgr_free(&mgr);
 	free(g_canvas.tiles);
 	free(g_canvas.color_list.colors);
 	free(g_canvas.color_response_cache);
-	list_destroy(g_canvas.connected_users);
-	list_destroy(g_canvas.connected_hosts);
+	list_destroy(&g_canvas.connected_users);
+	list_destroy(&g_canvas.connected_hosts);
+	list_destroy(&g_canvas.delta);
 	sqlite3_close(g_canvas.backing_db);
 	return 0;
 }
