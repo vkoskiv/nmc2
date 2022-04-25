@@ -30,29 +30,8 @@ void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 // Compile-time constants
 #define MAX_NICK_LEN 64
 
-// These come from the original implementation here:
-// https://github.com/vkoskiv/NoMansCanvas
-static struct color g_color_list[] = {
-	{255, 255, 255,  3},
-	{221, 221, 221, 10},
-	{117, 117, 117, 11},
-	{  0,   0,   0,  4},
-	{219,   0,   5,  0},
-	{252, 145, 199,  8},
-	{142,  87,  51, 12},
-	{189, 161, 113, 16},
-	{255, 153,  51,  7},
-	{255, 255,   0,  9},
-	{133, 222,  53,  1},
-	{ 24, 181,   4,  6},
-	{  0,   0, 255,  2},
-	{ 13, 109, 187, 13},
-	{ 26, 203, 213,  5},
-	{195,  80, 222, 14},
-	{110,   0, 108, 15},
-};
-
-#define COLOR_AMOUNT (sizeof(g_color_list) / sizeof(struct color))
+// Useful for testing, but be careful with this
+//#define DISABLE_RATE_LIMITING
 
 // q&d linked list
 
@@ -299,6 +278,11 @@ struct params {
 	char dbase_file[PATH_MAX];
 };
 
+struct color_list {
+	struct color *colors;
+	size_t amount;
+};
+
 struct canvas {
 	struct list connected_users;
 	struct list connected_hosts;
@@ -309,6 +293,8 @@ struct canvas {
 	struct mg_timer canvas_save_timer;
 	sqlite3 *backing_db; // For persistence
 	struct params settings;
+	struct color_list color_list;
+	char *color_response_cache;
 };
 
 // rate limiting
@@ -328,6 +314,9 @@ long get_ms_delta(struct timeval timer) {
 // This particular implementation is adapted from this SO answer:
 // https://stackoverflow.com/a/668327
 bool is_within_rate_limit(struct rate_limiter *limiter) {
+#ifdef DISABLE_RATE_LIMITING
+	return true;
+#else
 	bool is_within_limit = true;
 	long ms_since_last_tile = get_ms_delta(limiter->last_event_time);
 	gettimeofday(&limiter->last_event_time, NULL);
@@ -342,6 +331,7 @@ bool is_within_rate_limit(struct rate_limiter *limiter) {
 	}
 
 	return is_within_limit;
+#endif
 }
 
 // end rate limiting
@@ -392,6 +382,33 @@ char *load_file(const char *file_path, size_t *bytes) {
 	fclose(file);
 	if (bytes) *bytes = read_bytes;
 	return buf;
+}
+
+cJSON *color_to_json(struct color color) {
+	cJSON *c = cJSON_CreateObject();
+	cJSON_AddNumberToObject(c, "R", color.red);
+	cJSON_AddNumberToObject(c, "G", color.green);
+	cJSON_AddNumberToObject(c, "B", color.blue);
+	cJSON_AddNumberToObject(c, "ID", color.color_id);
+	return c;
+}
+
+cJSON *base_response(const char *type) {
+	cJSON *payload = cJSON_CreateObject();
+	cJSON_AddStringToObject(payload, "responseType", type);
+	return payload;
+}
+
+void update_color_response_cache(struct canvas *c) {
+	if (c->color_response_cache) free(c->color_response_cache);
+
+	cJSON *color_list = cJSON_CreateArray();
+	cJSON *response_object = base_response("colorList");
+	cJSON_InsertItemInArray(color_list, 0, response_object);
+	for (size_t i = 0; i < c->color_list.amount; ++i) {
+		cJSON_InsertItemInArray(color_list, i + 1, color_to_json(c->color_list.colors[i]));
+	}
+	c->color_response_cache = cJSON_PrintUnformatted(color_list);
 }
 
 //TODO: Restart timers when those change
@@ -463,6 +480,11 @@ void load_config(struct canvas *c) {
 		logr("dbase_file not a string, exiting.\n");
 		goto bail;
 	}
+	const cJSON *colors = cJSON_GetObjectItem(config, "colors");
+	if (!cJSON_IsArray(colors)) {
+		logr("colors not an array, exiting\n");
+		goto bail;
+	}
 
 	c->settings.new_db_canvas_size = canvas_size->valueint;
 	c->settings.getcanvas_max_rate = gc_maxrate->valuedouble;
@@ -475,6 +497,25 @@ void load_config(struct canvas *c) {
 	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid) - 1);
 	strncpy(c->settings.listen_url, listen_url->valuestring, sizeof(c->settings.listen_url) - 1);
 	strncpy(c->settings.dbase_file, dbase_file->valuestring, sizeof(c->settings.dbase_file) - 1);
+
+	if (c->color_list.colors) free(c->color_list.colors);
+	c->color_list.amount = cJSON_GetArraySize(colors);
+	c->color_list.colors = calloc(c->color_list.amount, sizeof(struct color));
+	for (size_t i = 0; i < c->color_list.amount; ++i) {
+		cJSON *color = cJSON_GetArrayItem(colors, i);
+		if (!cJSON_IsArray(color) || cJSON_GetArraySize(color) != 4) {
+			logr("Color at index %lu not an array of format [R,G,B,id]\n", i);
+			goto bail;
+		}
+		c->color_list.colors[i] = (struct color){
+			cJSON_GetArrayItem(color, 0)->valueint,
+			cJSON_GetArrayItem(color, 1)->valueint,
+			cJSON_GetArrayItem(color, 2)->valueint,
+			cJSON_GetArrayItem(color, 3)->valueint,
+		};
+	}
+
+	update_color_response_cache(c);
 
 	cJSON_Delete(config);
 	free(conf);
@@ -490,8 +531,8 @@ void load_config(struct canvas *c) {
 	"\t\"websocket_ping_interval_sec\": %lu,\n"
 	"\t\"admin_uuid\": %.*s,\n"
 	"\t\"listen_url\": %.*s,\n"
-	"\t\"dbase_file\": %.*s,\n"
-	"}\n",
+	"\t\"dbase_file\": %.*s\n"
+	"\t\"colors\": [\n",
 	c->settings.new_db_canvas_size,
 	c->settings.getcanvas_max_rate,
 	c->settings.getcanvas_per_seconds,
@@ -504,8 +545,14 @@ void load_config(struct canvas *c) {
 	(int)sizeof(c->settings.listen_url), c->settings.listen_url,
 	(int)sizeof(c->settings.dbase_file), c->settings.dbase_file
 	);
+	for (size_t i = 0; i < c->color_list.amount; ++i) {
+		struct color co = c->color_list.colors[i];
+		printf("\t\t[%3i, %3i, %3i, %3i]\n", co.red, co.green, co.blue, co.color_id);
+	}
+	printf("\t]\n}\n");
 	return;
 bail:
+	logr("params.json invalid, exiting.\n");
 	if (c->backing_db) sqlite3_close(c->backing_db);
 	exit(-1);
 }
@@ -541,12 +588,6 @@ void broadcast(const cJSON *payload) {
 		struct user *user = (struct user *)elem->thing;
 		send_json(payload, user);
 	}
-}
-
-cJSON *base_response(const char *type) {
-	cJSON *payload = cJSON_CreateObject();
-	cJSON_AddStringToObject(payload, "responseType", type);
-	return payload;
 }
 
 cJSON *error_response(char *error_message) {
@@ -1051,7 +1092,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 
 	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
-	if (color_id > COLOR_AMOUNT - 1) return error_response("Invalid colorID");
+	if (color_id > g_canvas.color_list.amount - 1) return error_response("Invalid colorID");
 
 	user->remaining_tiles--;
 	user->total_tiles_placed++;
@@ -1081,15 +1122,6 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	return NULL; // The broadcast takes care of this
 }
 
-cJSON *color_to_json(struct color color) {
-	cJSON *c = cJSON_CreateObject();
-	cJSON_AddNumberToObject(c, "R", color.red);
-	cJSON_AddNumberToObject(c, "G", color.green);
-	cJSON_AddNumberToObject(c, "B", color.blue);
-	cJSON_AddNumberToObject(c, "ID", color.color_id);
-	return c;
-}
-
 // The API is a bit weird. Instead of having a responsetype and an array in an object
 // we have an array where the first object is an object containing the responsetype, rest
 // are objects containing colors. *shrug*
@@ -1097,14 +1129,7 @@ cJSON *handle_get_colors(const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
-	//TODO: Might as well cache this color list instead of building it every time.
-	cJSON *color_list = cJSON_CreateArray();
-	cJSON *response_object = base_response("colorList");
-	cJSON_InsertItemInArray(color_list, 0, response_object);
-	for (size_t i = 0; i < COLOR_AMOUNT; ++i) {
-		cJSON_InsertItemInArray(color_list, i + 1, color_to_json(g_color_list[i]));
-	}
-	return color_list;
+	return cJSON_Parse(g_canvas.color_response_cache);
 }
 
 cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
@@ -1613,6 +1638,8 @@ int main(void) {
 	printf("Closing db\n");
 	mg_mgr_free(&mgr);
 	free(g_canvas.tiles);
+	free(g_canvas.color_list.colors);
+	free(g_canvas.color_response_cache);
 	list_destroy(g_canvas.connected_users);
 	list_destroy(g_canvas.connected_hosts);
 	sqlite3_close(g_canvas.backing_db);

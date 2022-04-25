@@ -30,6 +30,9 @@ You can find some runtime config options in params.json:
 * canvas_save_interval_sec - Save the canvas to db once every this many seconds
 * websocket_ping_interval_sec - Ping active websockets every this many seconds
 * admin_uuid - Doesn't have to be an uuid. Just the password to invoke admin commands at runtime (see tools directory)
+* listen_url - Address, port for listening
+* dbase_file - Name of the database file to use
+* colors     - Array of colors of format [R, G, B, id]. id has to be unique. Order in array determines which order they show up in the client.
 
 You can reload the config file at runtime by sending SIGUSR1 to the running process:
 `kill -SIGUSR1 $(pidof nmc2)`
