@@ -262,7 +262,7 @@ struct user {
 struct tile {
 	uint32_t color_id;
 	uint64_t place_time_unix;
-	char last_modifier[MAX_NICK_LEN];
+	char last_modifier[UUID_STR_LEN];
 };
 
 struct params {
@@ -1123,8 +1123,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
 	tile->color_id = color_id;
 	tile->place_time_unix = (unsigned)time(NULL);
-	//FIXME: This should be the uuid, *not* username!
-	strncpy(tile->last_modifier, user->user_name, sizeof(tile->last_modifier));
+	memcpy(tile->last_modifier, user->uuid, sizeof(tile->last_modifier));
 	
 	// Record delta for persistence. These get flushed to disk every canvas_save_interval_sec seconds.
 	struct tile_placement placement = {
@@ -1546,7 +1545,7 @@ bool load_tiles(struct canvas *c) {
 		size_t y = sqlite3_column_int(query, idx++);
 		g_canvas.tiles[x + y * g_canvas.edge_length].color_id = sqlite3_column_int(query, idx++);
 		const char *last_modifier = (const char *)sqlite3_column_text(query, idx++);
-		strncpy(g_canvas.tiles[x + y * g_canvas.edge_length].last_modifier, last_modifier, MAX_NICK_LEN - 1);
+		strncpy(g_canvas.tiles[x + y * g_canvas.edge_length].last_modifier, last_modifier, UUID_STR_LEN - 1);
 		g_canvas.tiles[x + y * g_canvas.edge_length].place_time_unix = sqlite3_column_int64(query, idx++);
 	}
 	sqlite3_finalize(query);
