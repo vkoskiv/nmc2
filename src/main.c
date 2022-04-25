@@ -315,6 +315,7 @@ long get_ms_delta(struct timeval timer) {
 // https://stackoverflow.com/a/668327
 bool is_within_rate_limit(struct rate_limiter *limiter) {
 #ifdef DISABLE_RATE_LIMITING
+	(void)limiter;
 	return true;
 #else
 	bool is_within_limit = true;
@@ -409,6 +410,7 @@ void update_color_response_cache(struct canvas *c) {
 		cJSON_InsertItemInArray(color_list, i + 1, color_to_json(c->color_list.colors[i]));
 	}
 	c->color_response_cache = cJSON_PrintUnformatted(color_list);
+	cJSON_Delete(color_list);
 }
 
 //TODO: Restart timers when those change
