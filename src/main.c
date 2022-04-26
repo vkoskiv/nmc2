@@ -1265,9 +1265,6 @@ struct remote_host *find_host(struct mg_addr addr) {
 		return hptr;
 	}
 
-	char ip_buf[50];
-	mg_ntoa(&addr, ip_buf, sizeof(ip_buf));
-	logr("Adding new host %s\n", ip_buf);
 	struct remote_host new = {
 		.addr = addr,
 	};
