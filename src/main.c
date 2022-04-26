@@ -620,8 +620,10 @@ void save_host(const struct remote_host *host) {
 		exit(-1);
 	}
 	int idx = 1;
+	char ipbuf[100];
+	mg_ntoa(&host->addr, ipbuf, sizeof(ipbuf));
 	ret = sqlite3_bind_int(query, idx++, host->total_accounts);
-	ret = sqlite3_bind_int(query, idx++, host->addr.ip);
+	ret = sqlite3_bind_text(query, idx++, ipbuf, strlen(ipbuf), NULL);
 
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
@@ -717,7 +719,9 @@ void add_host(const struct remote_host *host) {
 		exit(-1);
 	}
 	int idx = 1;
-	ret = sqlite3_bind_int(query, idx++, host->addr.ip);
+	char ipbuf[100];
+	mg_ntoa(&host->addr, ipbuf, sizeof(ipbuf));
+	ret = sqlite3_bind_text(query, idx++, ipbuf, strlen(ipbuf), NULL);
 	ret = sqlite3_bind_int(query, idx++, host->total_accounts);
 
 	ret = sqlite3_step(query);
@@ -779,7 +783,6 @@ void add_user(const struct user *user) {
 		exit(-1);
 	}
 	sqlite3_finalize(query);
-	printf("Inserted user %s\n", user->uuid);
 }
 
 struct remote_host *try_load_host(struct mg_addr addr) {
@@ -789,7 +792,9 @@ struct remote_host *try_load_host(struct mg_addr addr) {
 		logr("Failed to prepare host load query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
 		return NULL;
 	}
-	ret = sqlite3_bind_int(query, 1, addr.ip);
+	char ipbuf[100];
+	mg_ntoa(&addr, ipbuf, sizeof(ipbuf));
+	ret = sqlite3_bind_text(query, 1, ipbuf, strlen(ipbuf), NULL);
 	if (ret != SQLITE_OK) {
 		logr("Failed to bind ip to host load query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
 		return NULL;
@@ -804,7 +809,8 @@ struct remote_host *try_load_host(struct mg_addr addr) {
 	size_t i = 1;
 	host = calloc(1, sizeof(*host));
 
-	host->addr.ip = sqlite3_column_int(query, i++);
+	const char *user_name = (const char *)sqlite3_column_text(query, i++);
+	mg_aton(mg_str(user_name), &host->addr);
 	host->total_accounts = sqlite3_column_int(query, i++);
 
 	sqlite3_finalize(query);
@@ -911,13 +917,19 @@ void init_rate_limiter(struct rate_limiter *limiter, float max_rate, float per_s
 
 cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *host) {
 
-	host->total_accounts++;
-	save_host(host);
-	if (host->total_accounts >= g_canvas.settings.max_users_per_ip) {
-		char ip_buf[50];
-		mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
-		logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, g_canvas.settings.max_users_per_ip);
-		return error_response("Maximum users reached for this IP (contact vkoskiv if you think this is an issue)");
+	//FIXME: We should guarantee this is always provided
+	//Fall back to c->peer if X-Forwarded-For wasn't found.
+	if (host) {
+		host->total_accounts++;
+		save_host(host);
+		if (host->total_accounts > g_canvas.settings.max_users_per_ip) {
+			char ip_buf[50];
+			mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
+			logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, g_canvas.settings.max_users_per_ip);
+			return error_response("Maximum users reached for this IP (contact vkoskiv if you think this is an issue)");
+		}
+	} else {
+		logr("Warning: No host given to handle_initial_auth. Maybe fix this probably.\n");
 	}
 
 	struct user user = {
@@ -1282,8 +1294,18 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 
 	cJSON *response = NULL;
 	if (str_eq(reqstr, "initialAuth")) {
-		struct remote_host *host = find_host(connection->peer);
-		response = handle_initial_auth(connection, host);
+		if (strlen(connection->label)) {
+			// ^This means w're behind a proxy, and this connection was opened with a
+			// X-Forwarded-For header.
+			logr("Received initialAuth from %s\n", connection->label);
+			struct mg_addr remote_addr;
+			if (mg_aton(mg_str(connection->label), &remote_addr)) {
+				struct remote_host *host = find_host(remote_addr);
+				response = handle_initial_auth(connection, host);
+			}
+		} else {
+			response = handle_initial_auth(connection, NULL);
+		}
 	} else if (str_eq(reqstr, "auth")) {
 		response = handle_auth(user_id, connection);
 	} else if (str_eq(reqstr, "getCanvas")) {
@@ -1312,6 +1334,20 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 	if (event_type == MG_EV_HTTP_MSG) {
 		struct mg_http_message *msg = (struct mg_http_message *)event_data;
 		if (mg_http_match_uri(msg, "/ws")) {
+			struct mg_str *fwd_header = mg_http_get_header(msg, "X-Forwarded-For");
+			if (fwd_header) {
+				struct mg_str copy = mg_strdup(*fwd_header);
+				char *stash = (char *)copy.ptr;
+				struct mg_str k, v;
+				if (mg_commalist(&copy, &k, &v)) {
+					// This grabs the first string of a comma-separated list into k
+					// Which is the true client address, if proxies are to be trusted.
+					strncpy(c->label, k.ptr, k.len);
+				}
+				// This is ugly, and I had to cast away a const as well.
+				// Mongoose doesn't have a mg_str_free() and mg_commalist messes with this too :(
+				free(stash);
+			}
 			mg_ws_upgrade(c, msg, NULL);
 		} else if (mg_http_match_uri(msg, "/canvas")) {
 			//TODO: Return canvas encoded as a PNG
