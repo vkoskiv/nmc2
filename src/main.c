@@ -996,6 +996,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
 
+	logr("User %s connected.\n", uptr->uuid);
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
