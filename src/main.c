@@ -1102,7 +1102,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
 
 	if (!is_within_rate_limit(&user->tile_limiter)) {
-		return error_response("Rate limit exceeded");
+		return NULL;
 	}
 
 	//Another ugly detail, the client sends the colorID number as a string...
