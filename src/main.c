@@ -188,14 +188,14 @@ cJSON *base_response(const char *type) {
 void update_color_response_cache(struct canvas *c) {
 	if (c->color_response_cache) free(c->color_response_cache);
 
-	cJSON *color_list = cJSON_CreateArray();
 	cJSON *response_object = base_response("colorList");
-	cJSON_InsertItemInArray(color_list, 0, response_object);
+	cJSON *color_list = cJSON_CreateArray();
 	for (size_t i = 0; i < c->color_list.amount; ++i) {
 		cJSON_InsertItemInArray(color_list, i + 1, color_to_json(c->color_list.colors[i]));
 	}
-	c->color_response_cache = cJSON_PrintUnformatted(color_list);
-	cJSON_Delete(color_list);
+	cJSON_AddItemToObject(response_object, "colors", color_list);
+	c->color_response_cache = cJSON_PrintUnformatted(response_object);
+	cJSON_Delete(response_object);
 }
 
 //TODO: Restart timers when those change
@@ -384,12 +384,10 @@ void broadcast(const cJSON *payload) {
 }
 
 cJSON *error_response(char *error_message) {
-	cJSON *payload_array = cJSON_CreateArray();
 	cJSON *error = cJSON_CreateObject();
 	cJSON_AddStringToObject(error, "responseType", "error");
 	cJSON_AddStringToObject(error, "errorMessage", error_message);
-	cJSON_InsertItemInArray(payload_array, 0, error);
-	return payload_array;
+	return error;
 }
 
 void save_host(const struct remote_host *host) {
@@ -468,12 +466,10 @@ static void user_tile_increment_fn(void *arg) {
 	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
 	if (user->remaining_tiles == user->max_tiles) return;
 	user->remaining_tiles++;
-	cJSON *payload_wrapper = cJSON_CreateArray();
-	cJSON *payload = base_response("incrementTileCount");
-	cJSON_AddNumberToObject(payload, "amount", 1);
-	cJSON_InsertItemInArray(payload_wrapper, 0, payload);
-	send_json(payload_wrapper, user);
-	cJSON_Delete(payload_wrapper);
+	cJSON *response = base_response("incrementTileCount");
+	cJSON_AddNumberToObject(response, "amount", 1);
+	send_json(response, user);
+	cJSON_Delete(response);
 }
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr) {
@@ -482,12 +478,10 @@ void start_user_timer(struct user *user, struct mg_mgr *mgr) {
 }
 
 void send_user_count(void) {
-	cJSON *payload_wrapper = cJSON_CreateArray();
-	cJSON *payload = base_response("userCount");
-	cJSON_AddNumberToObject(payload, "count", list_elems(&g_canvas.connected_users));
-	cJSON_InsertItemInArray(payload_wrapper, 0, payload);
-	broadcast(payload_wrapper);
-	cJSON_Delete(payload_wrapper);
+	cJSON *response = base_response("userCount");
+	cJSON_AddNumberToObject(response, "count", list_elems(&g_canvas.connected_users));
+	broadcast(response);
+	cJSON_Delete(response);
 }
 
 void add_host(const struct remote_host *host) {
@@ -662,16 +656,14 @@ void level_up(struct user *user) {
 	}
 
 	//Tell the client the good news :^)
-	cJSON *payload_array = cJSON_CreateArray();
 	cJSON *response = base_response("levelUp");
 	cJSON_AddNumberToObject(response, "level", user->level);
 	cJSON_AddNumberToObject(response, "maxTiles", user->max_tiles);
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", user->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", user->current_level_progress);
 	cJSON_AddNumberToObject(response, "remainingTiles", user->remaining_tiles);
-	cJSON_InsertItemInArray(payload_array, 0, response);
-	send_json(payload_array, user);
-	cJSON_Delete(payload_array);
+	send_json(response, user);
+	cJSON_Delete(response);
 }
 
 void init_rate_limiter(struct rate_limiter *limiter, float max_rate, float per_seconds) {
@@ -723,9 +715,6 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 
 	uptr->last_event_unix = (unsigned)time(NULL);
 
-	// Again, a weird API because I didn't know what I was doing in 2017.
-	// An array with a single object that contains the response
-	cJSON *response_array = cJSON_CreateArray();
 	cJSON *response = base_response("authSuccessful");
 	cJSON_AddStringToObject(response, "uuid", uptr->uuid);
 	cJSON_AddNumberToObject(response, "remainingTiles", uptr->remaining_tiles);
@@ -733,8 +722,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	cJSON_AddNumberToObject(response, "maxTiles", uptr->max_tiles);
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
-	cJSON_InsertItemInArray(response_array, 0, response);
-	return response_array;
+	return response;
 }
 
 void drop_user_with_connection(struct mg_connection *c) {
@@ -805,9 +793,6 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
 	uptr->last_event_unix = cur_time;
 
-	// Again, a weird API because I didn't know what I was doing in 2017.
-	// An array with a single object that contains the response
-	cJSON *response_array = cJSON_CreateArray();
 	cJSON *response = base_response("reAuthSuccessful");
 	cJSON_AddNumberToObject(response, "remainingTiles", uptr->remaining_tiles);
 	cJSON_AddNumberToObject(response, "level", uptr->level);
@@ -816,11 +801,63 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
 	struct administrator *admin = find_in_admins(uptr->uuid);
 	cJSON_AddBoolToObject(response, "isAdministrator", admin != NULL);
-	cJSON_InsertItemInArray(response_array, 0, response);
-	return response_array;
+	return response;
 }
 
-cJSON *handle_get_canvas(const cJSON *user_id, bool binary) {
+uint8_t *handle_get_canvas_bin(const cJSON *user_id, size_t *bin_length) {
+	if (!cJSON_IsString(user_id)) return NULL;
+	struct user *user = check_and_fetch_user(user_id->valuestring);
+	if (!user) return NULL;	
+	
+	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
+	if (!within_limit) {
+		logr("CANVAS rate limit exceeded\n");
+		return NULL;
+	}
+	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
+	struct timeval tmr;
+	gettimeofday(&tmr, NULL);
+
+	uint8_t *pixels = calloc(tilecount, 1);
+	for (size_t i = 0; i < tilecount; ++i) {
+		pixels[i] = g_canvas.tiles[i].color_id;
+	}
+
+	size_t compressed_len = compressBound(tilecount);
+	uint8_t *compressed = malloc(compressed_len);
+	logr("Compressing with initial: %lu...\n", compressed_len);
+	int ret = compress(compressed, &compressed_len, pixels, tilecount);
+	if (ret != Z_OK) {
+		if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
+		if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
+	}
+	/*
+	uint8_t *uncompressed = calloc(tilecount, 1);
+	size_t uncompressed_len = tilecount;
+	logr("Uncompressing...\n");
+	ret = uncompress(uncompressed, &uncompressed_len, compressed, compressed_len);
+	if (ret != Z_OK) {
+		if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
+		if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
+		if (ret == Z_DATA_ERROR) logr("Z_DATA_ERROR\n");
+	}
+
+	int bab = memcmp(pixels, uncompressed, tilecount);
+	if (bab == 0) {
+		logr("Match!\n");
+	} else {
+		logr("memcmp() returned %i\n", bab);
+	}
+	*/
+	long ms = get_ms_delta(tmr);
+	logr("gather, pack took %lums\n", ms);
+
+	free(pixels);
+	if (bin_length) *bin_length = compressed_len;
+	return compressed;
+}
+
+cJSON *handle_get_canvas(const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = find_in_connected_users(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
@@ -832,60 +869,40 @@ cJSON *handle_get_canvas(const cJSON *user_id, bool binary) {
 	}
 	user->last_event_unix = (unsigned)time(NULL);
 	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
-	if (binary) {
-		struct timeval tmr;
-		gettimeofday(&tmr, NULL);
-		uint8_t *pixels = calloc(tilecount, 1);
-		for (size_t i = 0; i < tilecount; ++i) {
-			pixels[i] = g_canvas.tiles[i].color_id;
-		}
 
-		size_t compressed_len = compressBound(tilecount);
-		uint8_t *compressed = malloc(compressed_len);
-		int ret = compress(compressed, &compressed_len, pixels, tilecount);
-		if (ret != Z_OK) {
-			if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
-			if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
-		}
-
-		char *zlib_b64_encoded = b64encode(compressed, compressed_len);
-		cJSON *response_wrapper = cJSON_CreateArray();
-		cJSON *response = base_response("fullCanvasZlib");
-		cJSON_InsertItemInArray(response_wrapper, 0, response);
-		
-		cJSON *content = cJSON_CreateString(zlib_b64_encoded);
-		cJSON_InsertItemInArray(response_wrapper, 1, content);
-		free(pixels);
-		free(zlib_b64_encoded);
-		free(compressed);
-		long ms = get_ms_delta(tmr);
-		logr("Sending zlib'd canvas to %s. (%lums)\n", user->uuid, ms);
-		return response_wrapper;
-	} else {
-		struct timeval tmr;
-		gettimeofday(&tmr, NULL);
-		cJSON *canvas_array = cJSON_CreateArray();
-		cJSON *response = base_response("fullCanvas");
-		cJSON_InsertItemInArray(canvas_array, 0, response);
-		for (size_t i = 0; i < tilecount; ++i) {
-			cJSON_AddItemToArray(canvas_array, cJSON_CreateNumber(g_canvas.tiles[i].color_id));
-		}
-		long ms = get_ms_delta(tmr);
-		logr("Sending canvas to %s. (%lums)\n", user->uuid, ms);
-		return canvas_array;
+	struct timeval tmr;
+	gettimeofday(&tmr, NULL);
+	uint8_t *pixels = calloc(tilecount, 1);
+	for (size_t i = 0; i < tilecount; ++i) {
+		pixels[i] = g_canvas.tiles[i].color_id;
 	}
 
-	return NULL;
+	size_t compressed_len = compressBound(tilecount);
+	uint8_t *compressed = malloc(compressed_len);
+	int ret = compress(compressed, &compressed_len, pixels, tilecount);
+	if (ret != Z_OK) {
+		if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
+		if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
+	}
+
+	char *zlib_b64_encoded = b64encode(compressed, compressed_len);
+	cJSON *response = base_response("fullCanvas");
+	cJSON *content = cJSON_CreateString(zlib_b64_encoded);
+	cJSON_AddItemToObject(response, "payload", content);
+	free(pixels);
+	free(zlib_b64_encoded);
+	free(compressed);
+	long ms = get_ms_delta(tmr);
+	logr("Sending zlib'd canvas to %s. (%lums)\n", user->uuid, ms);
+	return response;
 }
 
 cJSON *new_tile_update(size_t x, size_t y, size_t color_id) {
-	cJSON *payload_array = cJSON_CreateArray();
-	cJSON *payload = base_response("tileUpdate");
-	cJSON_AddNumberToObject(payload, "X", x);
-	cJSON_AddNumberToObject(payload, "Y", y);
-	cJSON_AddNumberToObject(payload, "colorID", color_id);
-	cJSON_InsertItemInArray(payload_array, 0, payload);
-	return payload_array;
+	cJSON *response = base_response("tileUpdate");
+	cJSON_AddNumberToObject(response, "X", x);
+	cJSON_AddNumberToObject(response, "Y", y);
+	cJSON_AddNumberToObject(response, "colorID", color_id);
+	return response;
 }
 
 cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param, const cJSON *color_id_param, const char *raw_request, size_t raw_request_length) {
@@ -976,12 +993,10 @@ cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
 }
 
 cJSON *broadcast_announcement(const char *message) {
-	cJSON *payload_array = cJSON_CreateArray();
-	cJSON *payload = base_response("announcement");
-	cJSON_AddStringToObject(payload, "message", message);
-	cJSON_InsertItemInArray(payload_array, 0, payload);
-	broadcast(payload_array);
-	cJSON_Delete(payload_array);
+	cJSON *response = base_response("announcement");
+	cJSON_AddStringToObject(response, "message", message);
+	broadcast(response);
+	cJSON_Delete(response);
 	return base_response("Success");
 }
 
@@ -1158,9 +1173,7 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	} else if (str_eq(reqstr, "auth")) {
 		response = handle_auth(user_id, connection);
 	} else if (str_eq(reqstr, "getCanvas")) {
-		response = handle_get_canvas(user_id, false);
-	} else if (str_eq(reqstr, "getCanvasBin")) {
-		response = handle_get_canvas(user_id, true);
+		response = handle_get_canvas(user_id);
 	} else if (str_eq(reqstr, "postTile")) {
 		response = handle_post_tile(user_id, x, y, color_id, cmd, len);
 	} else if (str_eq(reqstr, "getColors")) {
@@ -1582,11 +1595,9 @@ int main(void) {
 	mg_http_listen(&mgr, g_canvas.settings.listen_url, callback_fn, NULL);
 	while (g_running) mg_mgr_poll(&mgr, 1000);
 
-	cJSON *payload_array = cJSON_CreateArray();
-	cJSON *payload = base_response("disconnecting");
-	cJSON_InsertItemInArray(payload_array, 0, payload);
-	broadcast(payload_array);
-	cJSON_Delete(payload_array);
+	cJSON *response = base_response("disconnecting");
+	broadcast(response);
+	cJSON_Delete(response);
 	drop_all_connections();
 
 	//FIXME: Hack. Just flush some events before closing
