@@ -1373,6 +1373,34 @@ static void ping_timer_fn(void *arg) {
 	}
 }
 
+void start_transaction() {
+	sqlite3 *db = g_canvas.backing_db;
+	sqlite3_stmt *bt;
+	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
+	int ret = sqlite3_step(bt);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to begin transaction\n");
+		sqlite3_finalize(bt);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	sqlite3_finalize(bt);
+}
+
+void commit_transaction() {
+	sqlite3 *db = g_canvas.backing_db;
+	sqlite3_stmt *et;
+	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
+	int ret = sqlite3_step(et);
+	if (ret != SQLITE_DONE) {
+		printf("Failed to commit transaction\n");
+		sqlite3_finalize(et);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	sqlite3_finalize(et);
+}
+
 static void users_save_timer_fn(void *arg) {
 	(void)arg;
 	struct timeval timer;
@@ -1380,11 +1408,13 @@ static void users_save_timer_fn(void *arg) {
 	size_t users = list_elems(&g_canvas.connected_users);
 	if (!users) return;
 	logr("Saving %lu users", users);
+	start_transaction();
 	struct list_elem *elem = NULL;
 	list_foreach(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		save_user(user);
 	}
+	commit_transaction();
 	printf(" (%lums)\n", get_ms_delta(timer));
 }
 
