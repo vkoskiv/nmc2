@@ -6,6 +6,7 @@
 	"setpixel_per_seconds": 1.0,
 	"max_users_per_ip": 64,
 	"canvas_save_interval_sec": 60,
+	"users_save_interval_sec": 60,
 	"websocket_ping_interval_sec": 25,
 	"admin_uuid": "<Desired userID here>",
 	"listen_url": "ws://0.0.0.0:3001",

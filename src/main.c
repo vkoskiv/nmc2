@@ -274,6 +274,7 @@ struct params {
 	size_t max_users_per_ip;
 	size_t canvas_save_interval_sec;
 	size_t websocket_ping_interval_sec;
+	size_t users_save_interval_sec;
 	char admin_uuid[UUID_STR_LEN];
 	char listen_url[128];
 	char dbase_file[PATH_MAX];
@@ -299,6 +300,7 @@ struct canvas {
 	uint32_t edge_length;
 	struct mg_timer ws_ping_timer;
 	struct mg_timer canvas_save_timer;
+	struct mg_timer users_save_timer;
 	sqlite3 *backing_db; // For persistence
 	struct params settings;
 	struct color_list color_list;
@@ -475,6 +477,11 @@ void load_config(struct canvas *c) {
 		logr("websocket_ping_interval_sec not a number, exiting.\n");
 		goto bail;
 	}
+	const cJSON *us_interval = cJSON_GetObjectItem(config, "users_save_interval_sec");
+	if (!cJSON_IsNumber(us_interval)) {
+		logr("users_save_interval_sec not a number, exiting\n");
+		goto bail;
+	}
 	const cJSON *admin_uuid  = cJSON_GetObjectItem(config, "admin_uuid");
 	if (!cJSON_IsString(admin_uuid)) {
 		logr("admin_uuid not a string, exiting.\n");
@@ -504,6 +511,7 @@ void load_config(struct canvas *c) {
 	c->settings.max_users_per_ip = max_users->valueint;
 	c->settings.canvas_save_interval_sec = cs_interval->valueint;
 	c->settings.websocket_ping_interval_sec = wp_interval->valueint;
+	c->settings.users_save_interval_sec = us_interval->valueint;
 	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid) - 1);
 	strncpy(c->settings.listen_url, listen_url->valuestring, sizeof(c->settings.listen_url) - 1);
 	strncpy(c->settings.dbase_file, dbase_file->valuestring, sizeof(c->settings.dbase_file) - 1);
@@ -685,7 +693,6 @@ static void user_tile_increment_fn(void *arg) {
 	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
 	if (user->remaining_tiles == user->max_tiles) return;
 	user->remaining_tiles++;
-	save_user(user);
 	cJSON *payload_wrapper = cJSON_CreateArray();
 	cJSON *payload = base_response("incrementTileCount");
 	cJSON_AddNumberToObject(payload, "amount", 1);
@@ -901,15 +908,6 @@ void level_up(struct user *user) {
 	cJSON_Delete(payload_array);
 }
 
-void dump_connected_users(void) {
-	struct list_elem *head = NULL;
-	size_t users = 0;
-	list_foreach(head, g_canvas.connected_users) {
-		users++;
-	}
-	printf("Connected users: %lu\n", users);
-}
-
 void init_rate_limiter(struct rate_limiter *limiter, float max_rate, float per_seconds) {
 	*limiter = (struct rate_limiter){ .current_allowance = max_rate, .max_rate = max_rate, .per_seconds = per_seconds };
 	gettimeofday(&limiter->last_event_time, NULL);
@@ -920,6 +918,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	//FIXME: We should guarantee this is always provided
 	//Fall back to c->peer if X-Forwarded-For wasn't found.
 	if (host) {
+		logr("Received initialAuth from %s\n", socket->label);
 		host->total_accounts++;
 		save_host(host);
 		if (host->total_accounts > g_canvas.settings.max_users_per_ip) {
@@ -948,7 +947,6 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	generate_uuid(user.uuid);
 	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
 	add_user(uptr);
-	dump_connected_users();
 	uptr->socket = socket;
 
 	// Set up rate limiting
@@ -956,6 +954,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	init_rate_limiter(&uptr->tile_limiter, g_canvas.settings.setpixel_max_rate, g_canvas.settings.setpixel_per_seconds);
 	save_user(uptr);
 
+	logr("User %s connected. (%4lu)\n", uptr->uuid, list_elems(&g_canvas.connected_users));
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
@@ -990,13 +989,12 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	if (!user) return error_response("Invalid userID");
 	struct user *uptr = list_append(g_canvas.connected_users, *user)->thing;
 	free(user);
-	dump_connected_users();
 	uptr->socket = socket;
 
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
 
-	logr("User %s connected.\n", uptr->uuid);
+	logr("User %s connected. (%4lu)\n", uptr->uuid, list_elems(&g_canvas.connected_users));
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
@@ -1007,7 +1005,6 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 		uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
 	}
 
-	save_user(uptr);
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -1028,7 +1025,6 @@ cJSON *handle_get_canvas(const cJSON *user_id, bool binary) {
 	if (!user) return error_response("Not authenticated");
 
 	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
-	save_user(user); // Save rate limiter state
 	if (!within_limit) {
 		logr("CANVAS rate limit exceeded\n");
 		return error_response("Rate limit exceeded");
@@ -1123,7 +1119,6 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (user->current_level_progress >= user->tiles_to_next_level) {
 		level_up(user);
 	}
-	save_user(user);
 
 	if (user->is_shadow_banned) {
 		logr("Rejecting request from shadowbanned user: %.*s\n", (int)raw_request_length, raw_request);
@@ -1172,7 +1167,6 @@ cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
 	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
 	logr("User %s set their username to %s\n", user_id->valuestring, name->valuestring);
 	strncpy(user->user_name, name->valuestring, sizeof(user->user_name) - 1);
-	save_user(user);
 	return base_response("nameSetSuccess");
 }
 
@@ -1191,10 +1185,11 @@ void drop_user_with_connection(struct mg_connection *c) {
 	list_foreach(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		if (user->socket != c) continue;
-		printf("User %s disconnected.\n", user->uuid);
+		logr("User %s disconnected. (%4lu)\n", user->uuid, list_elems(&g_canvas.connected_users) - 1);
 		user->last_connected_unix = (unsigned)time(NULL);
 		save_user(user);
 		mg_timer_free(&user->tile_increment_timer);
+		user->socket->is_draining = 1;
 		list_remove(g_canvas.connected_users, {
 			const struct user *list_user = (struct user *)arg;
 			return list_user->socket == user->socket;
@@ -1202,7 +1197,6 @@ void drop_user_with_connection(struct mg_connection *c) {
 		break;
 	}
 	send_user_count();
-	dump_connected_users();
 }
 
 void drop_all_connections(void) {
@@ -1212,7 +1206,7 @@ void drop_all_connections(void) {
 		user->last_connected_unix = (unsigned)time(NULL);
 		save_user(user);
 		mg_timer_free(&user->tile_increment_timer);
-		//FIXME: Seems like mongoose has no way to disconnect a ws from server end?
+		user->socket->is_draining = 1;
 		list_remove(g_canvas.connected_users, {
 			const struct user *list_user = (struct user *)arg;
 			return list_user->socket == user->socket;
@@ -1295,7 +1289,6 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 		if (strlen(connection->label)) {
 			// ^This means w're behind a proxy, and this connection was opened with a
 			// X-Forwarded-For header.
-			logr("Received initialAuth from %s\n", connection->label);
 			struct mg_addr remote_addr;
 			if (mg_aton(mg_str(connection->label), &remote_addr)) {
 				struct remote_host *host = find_host(remote_addr);
@@ -1378,6 +1371,21 @@ static void ping_timer_fn(void *arg) {
 	for (struct mg_connection *c = mgr->conns; c != NULL && c->is_websocket; c = c->next) {
 		mg_ws_send(c, NULL, 0, WEBSOCKET_OP_PING);
 	}
+}
+
+static void users_save_timer_fn(void *arg) {
+	(void)arg;
+	struct timeval timer;
+	gettimeofday(&timer, NULL);
+	size_t users = list_elems(&g_canvas.connected_users);
+	if (!users) return;
+	logr("Saving %lu users", users);
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		save_user(user);
+	}
+	printf(" (%lums)\n", get_ms_delta(timer));
 }
 
 static void canvas_save_timer_fn(void *arg) {
@@ -1674,6 +1682,7 @@ int main(void) {
 	//ws ping loop. TODO: Probably do this from the client side instead.
 	mg_timer_init(&g_canvas.ws_ping_timer, 1000 * g_canvas.settings.websocket_ping_interval_sec, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
 	mg_timer_init(&g_canvas.canvas_save_timer, 1000 * g_canvas.settings.canvas_save_interval_sec, MG_TIMER_REPEAT, canvas_save_timer_fn, &mgr);
+	mg_timer_init(&g_canvas.users_save_timer, 1000 * g_canvas.settings.users_save_interval_sec, MG_TIMER_REPEAT, users_save_timer_fn, &mgr);
 	printf("Starting WS listener on %s/ws\n", g_canvas.settings.listen_url);
 	mg_http_listen(&mgr, g_canvas.settings.listen_url, callback_fn, NULL);
 	while (g_running) mg_mgr_poll(&mgr, 1000);
@@ -1691,6 +1700,8 @@ int main(void) {
 	}
 	logr("Saving canvas one more time...\n");
 	canvas_save_timer_fn(NULL);
+	logr("Saving users...\n");
+	users_save_timer_fn(NULL);
 
 	printf("Closing db\n");
 	mg_mgr_free(&mgr);
