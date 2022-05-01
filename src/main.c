@@ -1259,6 +1259,7 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 	struct user *user = check_and_fetch_user(tile->last_modifier);
 	if (!user) user = try_load_user(tile->last_modifier);
 	if (!user) return error_response("Couldn't find a user who modified that tile.");
+	if (user->is_shadow_banned) return error_response("Already shadowbanned from there");
 	logr("User %s shadowbanned from (%4lu,%4lu)\n", user->uuid, x, y);
 	user->is_shadow_banned = true;
 	save_user(user);
