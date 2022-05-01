@@ -1,5 +1,5 @@
 {
-	"new_db_canvas_size": 512,
+	"new_db_canvas_size": 1024,
 	"getcanvas_max_rate": 1.0,
 	"getcanvas_per_seconds": 10.0,
 	"setpixel_max_rate": 5.0,
