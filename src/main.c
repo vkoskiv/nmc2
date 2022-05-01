@@ -1015,6 +1015,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	cJSON_AddNumberToObject(response, "maxTiles", uptr->max_tiles);
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
+	cJSON_AddBoolToObject(response, "isAdministrator", str_eq(uptr->uuid, g_canvas.settings.admin_uuid));
 	cJSON_InsertItemInArray(response_array, 0, response);
 	return response_array;
 }
@@ -1220,7 +1221,7 @@ cJSON *shut_down_server(void) {
 	return NULL;
 }
 
-cJSON *shadow_ban_user(const char *uuid) {
+cJSON *toggle_shadow_ban(const char *uuid) {
 	struct user *user = check_and_fetch_user(uuid);
 	if (!user) user = try_load_user(uuid);
 	if (!user) return error_response("No user found with that uuid");
@@ -1230,16 +1231,58 @@ cJSON *shadow_ban_user(const char *uuid) {
 	return base_response("Success");
 }
 
+cJSON *shadow_ban_user(const char *uuid) {
+	struct user *user = check_and_fetch_user(uuid);
+	if (!user) user = try_load_user(uuid);
+	if (!user) return error_response("No user found with that uuid");
+	logr("Setting is_shadow_banned to true for user %s\n", uuid);
+	user->is_shadow_banned = true;
+	save_user(user);
+	return base_response("Success");
+}
+
+cJSON *handle_ban_click(const cJSON *coordinates) {
+	if (!cJSON_IsArray(coordinates)) return error_response("No valid coordinates provided");
+	if (cJSON_GetArraySize(coordinates) < 2) return error_response("No valid coordinates provided");
+	cJSON *x_param = cJSON_GetArrayItem(coordinates, 0);
+	cJSON *y_param = cJSON_GetArrayItem(coordinates, 1);
+	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
+	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
+
+	size_t x = x_param->valueint;
+	size_t y = y_param->valueint;
+
+	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
+	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
+
+	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
+	struct user *user = check_and_fetch_user(tile->last_modifier);
+	if (!user) user = try_load_user(tile->last_modifier);
+	if (!user) return error_response("Couldn't find a user who modified that tile.");
+	logr("User %s shadowbanned from (%4lu,%4lu)\n", user->uuid, x, y);
+	user->is_shadow_banned = true;
+	save_user(user);
+	cJSON *wrapper = cJSON_CreateArray();
+	cJSON *payload = base_response("ban_click_success");
+	cJSON_InsertItemInArray(wrapper, 0, payload);
+	return wrapper;
+}
+
 cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	if (!cJSON_IsString(user_id)) return error_response("No valid userID provided");
-	if (!str_eq(user_id->valuestring, g_canvas.settings.admin_uuid)) return error_response("Invalid userID");	
+	if (!str_eq(user_id->valuestring, g_canvas.settings.admin_uuid)) {
+		logr("Rejecting admin command for unknown user %s. Naughty naughty!\n", user_id->valuestring);
+		return error_response("Invalid admin userID");	
+	}
 	if (!cJSON_IsObject(command)) return error_response("No valid command object provided");
 	const cJSON *action = cJSON_GetObjectItem(command, "action");	
 	const cJSON *message = cJSON_GetObjectItem(command, "message");
+	const cJSON *coordinates = cJSON_GetObjectItem(command, "coords");
 	if (!cJSON_IsString(action)) return error_response("Invalid command action");
 	if (str_eq(action->valuestring, "shutdown")) return shut_down_server();
 	if (str_eq(action->valuestring, "message")) return broadcast_announcement(message->valuestring);
-	if (str_eq(action->valuestring, "toggle_shadowban")) return shadow_ban_user(message->valuestring);
+	if (str_eq(action->valuestring, "toggle_shadowban")) return toggle_shadow_ban(message->valuestring);
+	if (str_eq(action->valuestring, "banclick")) return handle_ban_click(coordinates);
 	return NULL;
 }
 
