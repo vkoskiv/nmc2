@@ -43,9 +43,10 @@ struct list_elem {
 
 struct list {
 	struct list_elem *first;
+	struct list_elem *head;
 };
 
-#define LIST_INITIALIZER (struct list){ .first = NULL }
+#define LIST_INITIALIZER (struct list){ .first = NULL, .head = NULL }
 
 struct list_elem *_list_find_head(struct list *list) {
 	if (!list->first) return NULL;
@@ -95,10 +96,12 @@ struct list_elem *_list_append(struct list *list, const void *thing, size_t thin
 	if (!thing_size) return NULL;
 	if (!list->first) {
 		list->first = list_new_elem(thing, thing_size);
+		list->head = list->first;
 		return list->first;
 	}
-	struct list_elem *head = _list_find_head(list);
+	struct list_elem *head = list->head;
 	head->next = list_new_elem(thing, thing_size);
+	list->head = head->next;
 	return head->next;
 }
 
@@ -107,6 +110,7 @@ void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
 	struct list_elem *prev = current;
 	while (current) {
 		if (check_cb(current->thing)) {
+			if (current == list->head) list->head = prev;
 			prev->next = current->next;
 			if (current == list->first) {
 				list->first = current->next;
