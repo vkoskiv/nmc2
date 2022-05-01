@@ -1524,7 +1524,6 @@ static void canvas_save_timer_fn(void *arg) {
 bail:
 	sqlite3_finalize(insert);
 
-	gettimeofday(&timer, NULL);
 	sqlite3_stmt *et;
 	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
 	ret = sqlite3_step(et);
