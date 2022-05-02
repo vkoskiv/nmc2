@@ -774,18 +774,45 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	return response_array;
 }
 
+void drop_user_with_connection(struct mg_connection *c) {
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		if (user->socket != c) continue;
+		logr("User %s disconnected. (%4lu)\n", user->uuid, list_elems(&g_canvas.connected_users) - 1);
+		user->last_connected_unix = (unsigned)time(NULL);
+		save_user(user);
+		mg_timer_free(&user->tile_increment_timer);
+		user->socket->is_draining = 1;
+		list_remove(g_canvas.connected_users, {
+			const struct user *list_user = (struct user *)arg;
+			return list_user->socket == user->socket;
+		});
+		break;
+	}
+	send_user_count();
+}
+
+void kick_with_message(struct user *user, const char *message, const char *reconnect_btn_text) {
+	cJSON *wrapper = cJSON_CreateArray();
+	cJSON *response = base_response("kicked");
+	cJSON_AddStringToObject(response, "message", message ? message : "Kicked");
+	cJSON_AddStringToObject(response, "btn_text", reconnect_btn_text ? reconnect_btn_text : "Reconnect");
+	cJSON_InsertItemInArray(wrapper, 0, response);
+	send_json(wrapper, user);
+	drop_user_with_connection(user->socket);
+}
+
 cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (strlen(user_id->valuestring) > UUID_STR_LEN) return error_response("Invalid userID");
 
-	//FIXME: Awkward copy & free
-
-	// Verify we only have one session per socket.
-	struct user *user = user_for_connection(socket);
-	if (user) return error_response("Already authenticated");
-
-	bool session_running = false;
-	if (check_and_fetch_user(user_id->valuestring)) session_running = true;
+	// Kick old user if the user opens in more than one browser tab at once.
+	struct user *user = check_and_fetch_user(user_id->valuestring);
+	if (user) {
+		logr("Kicking %s, they opened a new session\n", user->uuid);
+		kick_with_message(user, "It looks like you opened another tab?", "Reconnect here");
+	}
 
 	user = try_load_user(user_id->valuestring);
 	if (!user) return error_response("Invalid userID");
@@ -800,13 +827,10 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
-	if (!session_running) {
-		size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
-		size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
-		// This is how it was in the original, might want to check
-		uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
-	}
-
+	size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
+	size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
+	// This is how it was in the original, might want to check
+	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -981,25 +1005,6 @@ cJSON *broadcast_announcement(const char *message) {
 	broadcast(payload_array);
 	cJSON_Delete(payload_array);
 	return base_response("Success");
-}
-
-void drop_user_with_connection(struct mg_connection *c) {
-	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
-		struct user *user = (struct user *)elem->thing;
-		if (user->socket != c) continue;
-		logr("User %s disconnected. (%4lu)\n", user->uuid, list_elems(&g_canvas.connected_users) - 1);
-		user->last_connected_unix = (unsigned)time(NULL);
-		save_user(user);
-		mg_timer_free(&user->tile_increment_timer);
-		user->socket->is_draining = 1;
-		list_remove(g_canvas.connected_users, {
-			const struct user *list_user = (struct user *)arg;
-			return list_user->socket == user->socket;
-		});
-		break;
-	}
-	send_user_count();
 }
 
 void drop_all_connections(void) {
