@@ -59,6 +59,7 @@ struct user {
 	uint32_t current_level_progress;
 	uint32_t level;
 	uint64_t last_connected_unix;
+	uint64_t last_event_unix;
 };
 
 struct tile {
@@ -77,6 +78,7 @@ struct params {
 	size_t canvas_save_interval_sec;
 	size_t websocket_ping_interval_sec;
 	size_t users_save_interval_sec;
+	size_t kick_inactive_after_sec;
 	char admin_uuid[UUID_STR_LEN];
 	char listen_url[128];
 	char dbase_file[PATH_MAX];
@@ -284,6 +286,11 @@ void load_config(struct canvas *c) {
 		logr("users_save_interval_sec not a number, exiting\n");
 		goto bail;
 	}
+	const cJSON *kick_secs = cJSON_GetObjectItem(config, "kick_inactive_after_sec");
+	if (!cJSON_IsNumber(kick_secs)) {
+		logr("kick_inactive_after_sec not a number, exiting.\n");
+		goto bail;
+	}
 	const cJSON *admin_uuid  = cJSON_GetObjectItem(config, "admin_uuid");
 	if (!cJSON_IsString(admin_uuid)) {
 		logr("admin_uuid not a string, exiting.\n");
@@ -314,6 +321,7 @@ void load_config(struct canvas *c) {
 	c->settings.canvas_save_interval_sec = cs_interval->valueint;
 	c->settings.websocket_ping_interval_sec = wp_interval->valueint;
 	c->settings.users_save_interval_sec = us_interval->valueint;
+	c->settings.kick_inactive_after_sec = kick_secs->valueint;
 	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid) - 1);
 	strncpy(c->settings.listen_url, listen_url->valuestring, sizeof(c->settings.listen_url) - 1);
 	strncpy(c->settings.dbase_file, dbase_file->valuestring, sizeof(c->settings.dbase_file) - 1);
@@ -349,6 +357,7 @@ void load_config(struct canvas *c) {
 	"\t\"max_users_per_ip\": %lu,\n"
 	"\t\"canvas_save_interval_sec\": %lu,\n"
 	"\t\"websocket_ping_interval_sec\": %lu,\n"
+	"\t\"kick_inactive_after_sec\": %lu,\n"
 	"\t\"admin_uuid\": %.*s,\n"
 	"\t\"listen_url\": %.*s,\n"
 	"\t\"dbase_file\": %.*s\n"
@@ -361,6 +370,7 @@ void load_config(struct canvas *c) {
 	c->settings.max_users_per_ip,
 	c->settings.canvas_save_interval_sec,
 	c->settings.websocket_ping_interval_sec,
+	c->settings.kick_inactive_after_sec,
 	(int)sizeof(c->settings.admin_uuid), c->settings.admin_uuid,
 	(int)sizeof(c->settings.listen_url), c->settings.listen_url,
 	(int)sizeof(c->settings.dbase_file), c->settings.dbase_file
@@ -760,6 +770,8 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
+	uptr->last_event_unix = (unsigned)time(NULL);
+
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
 	cJSON *response_array = cJSON_CreateArray();
@@ -827,10 +839,12 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
-	size_t sec_since_last_connected = (unsigned)time(NULL) - uptr->last_connected_unix;
+	uint64_t cur_time = (unsigned)time(NULL);
+	size_t sec_since_last_connected = cur_time - uptr->last_connected_unix;
 	size_t tiles_to_add = sec_since_last_connected / uptr->tile_regen_seconds;
 	// This is how it was in the original, might want to check
 	uptr->remaining_tiles += tiles_to_add > uptr->max_tiles ? uptr->max_tiles - uptr->remaining_tiles : tiles_to_add;
+	uptr->last_event_unix = cur_time;
 
 	// Again, a weird API because I didn't know what I was doing in 2017.
 	// An array with a single object that contains the response
@@ -856,6 +870,7 @@ cJSON *handle_get_canvas(const cJSON *user_id, bool binary) {
 		logr("CANVAS rate limit exceeded\n");
 		return error_response("Rate limit exceeded");
 	}
+	user->last_event_unix = (unsigned)time(NULL);
 	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
 	if (binary) {
 		struct timeval tmr;
@@ -946,6 +961,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (user->current_level_progress >= user->tiles_to_next_level) {
 		level_up(user);
 	}
+	user->last_event_unix = (unsigned)time(NULL);
 
 	if (user->is_shadow_banned) {
 		logr("Rejecting request from shadowbanned user: %.*s\n", (int)raw_request_length, raw_request);
@@ -957,7 +973,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	
 	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
 	tile->color_id = color_id;
-	tile->place_time_unix = (unsigned)time(NULL);
+	tile->place_time_unix = user->last_event_unix;
 	memcpy(tile->last_modifier, user->uuid, sizeof(tile->last_modifier));
 	
 	// Record delta for persistence. These get flushed to disk every canvas_save_interval_sec seconds.
@@ -983,6 +999,7 @@ cJSON *handle_get_colors(const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = check_and_fetch_user(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
+	user->last_event_unix = (unsigned)time(NULL);
 	return cJSON_Parse(g_canvas.color_response_cache);
 }
 
@@ -994,6 +1011,7 @@ cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
 	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
 	logr("User %s set their username to %s\n", user_id->valuestring, name->valuestring);
 	strncpy(user->user_name, name->valuestring, sizeof(user->user_name) - 1);
+	user->last_event_unix = (unsigned)time(NULL);
 	return base_response("nameSetSuccess");
 }
 
@@ -1267,6 +1285,18 @@ static void users_save_timer_fn(void *arg) {
 	}
 	commit_transaction();
 	printf(" (%lums)\n", get_ms_delta(timer));
+
+	// Check and kick inactive users
+	uint64_t current_time_unix = (unsigned)time(NULL);
+	elem = NULL;
+	list_foreach(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		size_t sec_since_last_event = current_time_unix - user->last_event_unix;
+		if (sec_since_last_event > g_canvas.settings.kick_inactive_after_sec) {
+			logr("Kicking inactive user %s\n", user->uuid);
+			kick_with_message(user, "You haven't drawn anything for a while, so you were disconnected.", "Reconnect");
+		}
+	}
 }
 
 static void canvas_save_timer_fn(void *arg) {
