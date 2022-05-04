@@ -8,8 +8,16 @@
 	"canvas_save_interval_sec": 60,
 	"users_save_interval_sec": 60,
 	"websocket_ping_interval_sec": 25,
-	"admin_uuid": "<Desired userID here>",
 	"kick_inactive_after_sec": 3600,
+	"administrators": [
+		{
+			"uuid": "<Desired userID here>",
+			"shutdown": true,
+			"announce": true,
+			"shadowban": true,
+			"banclick": true
+		}
+	],
 	"listen_url": "ws://0.0.0.0:3001",
 	"dbase_file": "pixels.db",
 	"colors": [

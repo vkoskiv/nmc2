@@ -79,7 +79,6 @@ struct params {
 	size_t websocket_ping_interval_sec;
 	size_t users_save_interval_sec;
 	size_t kick_inactive_after_sec;
-	char admin_uuid[UUID_STR_LEN];
 	char listen_url[128];
 	char dbase_file[PATH_MAX];
 };
@@ -95,9 +94,18 @@ struct tile_placement {
 	struct tile tile;
 };
 
+struct administrator {
+	char uuid[UUID_STR_LEN + 1];
+	bool can_shutdown;
+	bool can_announce;
+	bool can_shadowban;
+	bool can_banclick;
+};
+
 struct canvas {
 	struct list connected_users;
 	struct list connected_hosts;
+	struct list administrators;
 	struct list delta;
 	struct tile *tiles;
 	bool dirty;
@@ -291,9 +299,9 @@ void load_config(struct canvas *c) {
 		logr("kick_inactive_after_sec not a number, exiting.\n");
 		goto bail;
 	}
-	const cJSON *admin_uuid  = cJSON_GetObjectItem(config, "admin_uuid");
-	if (!cJSON_IsString(admin_uuid)) {
-		logr("admin_uuid not a string, exiting.\n");
+	const cJSON *administrators  = cJSON_GetObjectItem(config, "administrators");
+	if (!cJSON_IsArray(administrators)) {
+		logr("administrators not an array, exiting.\n");
 		goto bail;
 	}
 	const cJSON *listen_url  = cJSON_GetObjectItem(config, "listen_url");
@@ -322,9 +330,33 @@ void load_config(struct canvas *c) {
 	c->settings.websocket_ping_interval_sec = wp_interval->valueint;
 	c->settings.users_save_interval_sec = us_interval->valueint;
 	c->settings.kick_inactive_after_sec = kick_secs->valueint;
-	strncpy(c->settings.admin_uuid, admin_uuid->valuestring, sizeof(c->settings.admin_uuid) - 1);
 	strncpy(c->settings.listen_url, listen_url->valuestring, sizeof(c->settings.listen_url) - 1);
 	strncpy(c->settings.dbase_file, dbase_file->valuestring, sizeof(c->settings.dbase_file) - 1);
+
+	// Load up administrator list
+	list_destroy(&g_canvas.administrators);
+	cJSON *admin = NULL;
+	cJSON_ArrayForEach(admin, administrators) {
+		if (!cJSON_IsObject(admin)) continue;
+		cJSON *uuid = cJSON_GetObjectItem(admin, "uuid");
+		cJSON *shutdown = cJSON_GetObjectItem(admin, "shutdown");
+		cJSON *announce = cJSON_GetObjectItem(admin, "announce");
+		cJSON *shadowban = cJSON_GetObjectItem(admin, "shadowban");
+		cJSON *banclick = cJSON_GetObjectItem(admin, "banclick");
+		if (!cJSON_IsString(uuid)) continue;
+		if (!cJSON_IsBool(shutdown)) continue;
+		if (!cJSON_IsBool(announce)) continue;
+		if (!cJSON_IsBool(shadowban)) continue;
+		if (!cJSON_IsBool(banclick)) continue;
+		struct administrator a = (struct administrator){
+			.can_shutdown = shutdown->valueint,
+			.can_announce = announce->valueint,
+			.can_shadowban = shadowban->valueint,
+			.can_banclick = banclick->valueint
+		};
+		strncpy(a.uuid, uuid->valuestring, sizeof(a.uuid) - 1);
+		list_append(g_canvas.administrators, a);
+	}
 
 	if (c->color_list.colors) free(c->color_list.colors);
 	c->color_list.amount = cJSON_GetArraySize(colors);
@@ -345,41 +377,9 @@ void load_config(struct canvas *c) {
 
 	update_color_response_cache(c);
 
+	logr("Loaded conf:\n%s\n", conf);
 	cJSON_Delete(config);
 	free(conf);
-	logr(
-	"Loaded conf:\n{\n"
-	"\t\"new_db_canvas_size\": %lu,\n"
-	"\t\"getcanvas_max_rate\": %.2f,\n"
-	"\t\"getcanvas_per_seconds\": %.2f,\n"
-	"\t\"setpixel_max_rate\": %.2f,\n"
-	"\t\"setpixel_per_seconds\": %.2f,\n"
-	"\t\"max_users_per_ip\": %lu,\n"
-	"\t\"canvas_save_interval_sec\": %lu,\n"
-	"\t\"websocket_ping_interval_sec\": %lu,\n"
-	"\t\"kick_inactive_after_sec\": %lu,\n"
-	"\t\"admin_uuid\": %.*s,\n"
-	"\t\"listen_url\": %.*s,\n"
-	"\t\"dbase_file\": %.*s\n"
-	"\t\"colors\": [\n",
-	c->settings.new_db_canvas_size,
-	c->settings.getcanvas_max_rate,
-	c->settings.getcanvas_per_seconds,
-	c->settings.setpixel_max_rate,
-	c->settings.setpixel_per_seconds,
-	c->settings.max_users_per_ip,
-	c->settings.canvas_save_interval_sec,
-	c->settings.websocket_ping_interval_sec,
-	c->settings.kick_inactive_after_sec,
-	(int)sizeof(c->settings.admin_uuid), c->settings.admin_uuid,
-	(int)sizeof(c->settings.listen_url), c->settings.listen_url,
-	(int)sizeof(c->settings.dbase_file), c->settings.dbase_file
-	);
-	for (size_t i = 0; i < c->color_list.amount; ++i) {
-		struct color co = c->color_list.colors[i];
-		printf("\t\t[%3i, %3i, %3i, %3i]\n", co.red, co.green, co.blue, co.color_id);
-	}
-	printf("\t]\n}\n");
 	return;
 bail:
 	logr("params.json invalid, exiting.\n");
@@ -815,6 +815,15 @@ void kick_with_message(struct user *user, const char *message, const char *recon
 	drop_user_with_connection(user->socket);
 }
 
+struct administrator *find_in_admins(const char *uuid) {
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.administrators) {
+		struct administrator *admin = (struct administrator *)elem->thing;
+		if (str_eq(admin->uuid, uuid)) return admin;
+	}
+	return NULL;
+}
+
 cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (strlen(user_id->valuestring) > UUID_STR_LEN) return error_response("Invalid userID");
@@ -855,7 +864,8 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	cJSON_AddNumberToObject(response, "maxTiles", uptr->max_tiles);
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
-	cJSON_AddBoolToObject(response, "isAdministrator", str_eq(uptr->uuid, g_canvas.settings.admin_uuid));
+	struct administrator *admin = find_in_admins(uptr->uuid);
+	cJSON_AddBoolToObject(response, "isAdministrator", admin != NULL);
 	cJSON_InsertItemInArray(response_array, 0, response);
 	return response_array;
 }
@@ -1085,6 +1095,9 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 	if (!user) user = try_load_user(tile->last_modifier);
 	if (!user) return error_response("Couldn't find a user who modified that tile.");
 	if (user->is_shadow_banned) return error_response("Already shadowbanned from there");
+	// Just in case...
+	struct administrator *admin = find_in_admins(user->uuid);
+	if (admin) return error_response("Refusing to shadowban an administrator");
 	logr("User %s shadowbanned from (%4lu,%4lu)\n", user->uuid, x, y);
 	user->is_shadow_banned = true;
 	save_user(user);
@@ -1096,7 +1109,8 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 
 cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	if (!cJSON_IsString(user_id)) return error_response("No valid userID provided");
-	if (!str_eq(user_id->valuestring, g_canvas.settings.admin_uuid)) {
+	struct administrator *admin = find_in_admins(user_id->valuestring);
+	if (!admin) {
 		logr("Rejecting admin command for unknown user %s. Naughty naughty!\n", user_id->valuestring);
 		return error_response("Invalid admin userID");	
 	}
@@ -1105,11 +1119,35 @@ cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	const cJSON *message = cJSON_GetObjectItem(command, "message");
 	const cJSON *coordinates = cJSON_GetObjectItem(command, "coords");
 	if (!cJSON_IsString(action)) return error_response("Invalid command action");
-	if (str_eq(action->valuestring, "shutdown")) return shut_down_server();
-	if (str_eq(action->valuestring, "message")) return broadcast_announcement(message->valuestring);
-	if (str_eq(action->valuestring, "toggle_shadowban")) return toggle_shadow_ban(message->valuestring);
-	if (str_eq(action->valuestring, "banclick")) return handle_ban_click(coordinates);
-	return NULL;
+	if (str_eq(action->valuestring, "shutdown")) {
+		if (admin->can_shutdown) {
+			return shut_down_server();
+		} else {
+			return error_response("You don't have shutdown permission");
+		}
+	}
+	if (str_eq(action->valuestring, "message")) {
+		if (admin->can_announce) {
+			return broadcast_announcement(message->valuestring);
+		} else {
+			return error_response("You don't have announce permission");
+		}
+	}
+	if (str_eq(action->valuestring, "toggle_shadowban")) {
+		if (admin->can_shadowban) {
+			return toggle_shadow_ban(message->valuestring);
+		} else {
+			return error_response("You don't have shadowban permission");
+		}
+	}
+	if (str_eq(action->valuestring, "banclick")) {
+		if (admin->can_banclick) {
+			return handle_ban_click(coordinates);
+		} else {
+			return error_response("You don't have banclick permission");
+		}
+	}
+	return error_response("Unknown admin action invoked");
 }
 
 bool mg_addr_eq(struct mg_addr a, struct mg_addr b) {
@@ -1547,14 +1585,14 @@ void sigusr1_handler(int sig) {
 void logr(const char *fmt, ...) {
 	if (!fmt) return;
 	printf("%u ", (unsigned)time(NULL));
-	char buf[512];
+	char buf[1024];
 	int ret = 0;
 	va_list vl;
 	va_start(vl, fmt);
 	ret += vsnprintf(buf, sizeof(buf), fmt, vl);
 	va_end(vl);
 	printf("%s", buf);
-	if (ret > 512) {
+	if (ret > 1024) {
 		printf("...\n");
 	}
 }
@@ -1565,11 +1603,17 @@ int main(void) {
 	g_canvas = (struct canvas){ 0 };
 	load_config(&g_canvas);
 
-	if (str_eq(g_canvas.settings.admin_uuid, "<Desired userID here>")) {
-		logr("Warning - Admin UUID still at default, anyone can shut down this server.\n");
-		logr("Substitute admin_uuid in params.json with your desired UUID before running.\n");
-		exit(-1);
+	struct list_elem *elem = NULL;
+	list_foreach(elem, g_canvas.administrators) {
+		struct administrator *admin = (struct administrator *)elem->thing;
+
+		if (str_eq(admin->uuid, "<Desired userID here>")) {
+			logr("Warning - Admin UUID still at default, anyone can shut down this server.\n");
+			logr("Substitute uuid in params.json admin list with your desired UUID before running.\n");
+			exit(-1);
+		}
 	}
+
 	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
 		printf("Failed to register sigint handler\n");
 		return -1;
@@ -1620,6 +1664,7 @@ int main(void) {
 	free(g_canvas.color_response_cache);
 	list_destroy(&g_canvas.connected_users);
 	list_destroy(&g_canvas.connected_hosts);
+	list_destroy(&g_canvas.administrators);
 	list_destroy(&g_canvas.delta);
 	sqlite3_close(g_canvas.backing_db);
 	return 0;
