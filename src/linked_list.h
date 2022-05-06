@@ -78,7 +78,9 @@ static inline struct list_elem *_list_append(struct list *list, const void *thin
 static inline void _list_remove(struct list *list, bool (*check_cb)(void *elem)) {
 	struct list_elem *current = list->first;
 	struct list_elem *prev = current;
+	struct list_elem *next = NULL;
 	while (current) {
+		next = current->next;
 		if (check_cb(current->thing)) {
 			if (current == list->head) list->head = prev;
 			prev->next = current->next;
@@ -90,7 +92,7 @@ static inline void _list_remove(struct list *list, bool (*check_cb)(void *elem))
 			return;
 		}
 		prev = current;
-		current = current->next;
+		current = next;
 	}
 }
 
@@ -104,6 +106,22 @@ static inline void _list_remove(struct list *list, bool (*check_cb)(void *elem))
 #define list_remove(list, ...) list_remove_internal(list, CONCAT(check_, __COUNTER__), __VA_ARGS__)
 
 #define list_append(list, thing) _list_append(&list, &thing, sizeof(thing))
-#define list_foreach(element, list) for (element = list.first; list.first && element; element = element->next)
+
+static inline void _list_foreach(struct list *list, void (*callback)(void *elem)) {
+	struct list_elem *current = list->first;
+	struct list_elem *next = NULL;
+	while (current) {
+		next = current->next;
+		callback(current->thing);
+		current = next;
+	}
+}
+
+#define list_foreach_internal(list, funcname, ...) \
+	void funcname(void *arg) __VA_ARGS__ \
+	_list_foreach(&list, funcname)
+#define list_foreach(list, ...) list_foreach_internal(list, CONCAT(check_, __COUNTER__), __VA_ARGS__)
+
+#define list_foreach_ro(element, list) for (element = list.first; list.first && element; element = element->next)
 
 // end linked list

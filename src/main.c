@@ -404,7 +404,7 @@ char *str_cpy(const char *source) {
 	return copy;
 }
 
-void send_json(const cJSON *payload, struct user *user) {
+void send_json(const cJSON *payload, const struct user *user) {
 	char *str = cJSON_PrintUnformatted(payload);
 	if (!str) return;
 	mg_ws_send(user->socket, str, strlen(str), WEBSOCKET_OP_TEXT);
@@ -414,7 +414,7 @@ void send_json(const cJSON *payload, struct user *user) {
 void broadcast(const cJSON *payload) {
 	//FIXME: Make list_foreach more ergonomic
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
+	list_foreach_ro(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		send_json(payload, user);
 	}
@@ -681,7 +681,7 @@ struct user *try_load_user(const char *uuid) {
 
 struct user *user_for_connection(struct mg_connection *c) {
 	struct list_elem *head = NULL;
-	list_foreach(head, g_canvas.connected_users) {
+	list_foreach_ro(head, g_canvas.connected_users) {
 		struct user *user = (struct user *)head->thing;
 		if (user->socket == c) return user;
 	}
@@ -690,7 +690,7 @@ struct user *user_for_connection(struct mg_connection *c) {
 
 struct user *check_and_fetch_user(const char *uuid) {
 	struct list_elem *head = NULL;
-	list_foreach(head, g_canvas.connected_users) {
+	list_foreach_ro(head, g_canvas.connected_users) {
 		struct user *user = (struct user *)head->thing;
 		if (str_eq(user->uuid, uuid)) return user;
 	}
@@ -788,7 +788,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 
 void drop_user_with_connection(struct mg_connection *c) {
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
+	list_foreach_ro(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		if (user->socket != c) continue;
 		logr("User %s disconnected. (%4lu)\n", user->uuid, list_elems(&g_canvas.connected_users) - 1);
@@ -805,7 +805,7 @@ void drop_user_with_connection(struct mg_connection *c) {
 	send_user_count();
 }
 
-void kick_with_message(struct user *user, const char *message, const char *reconnect_btn_text) {
+void kick_with_message(const struct user *user, const char *message, const char *reconnect_btn_text) {
 	cJSON *wrapper = cJSON_CreateArray();
 	cJSON *response = base_response("kicked");
 	cJSON_AddStringToObject(response, "message", message ? message : "Kicked");
@@ -817,7 +817,7 @@ void kick_with_message(struct user *user, const char *message, const char *recon
 
 struct administrator *find_in_admins(const char *uuid) {
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.administrators) {
+	list_foreach_ro(elem, g_canvas.administrators) {
 		struct administrator *admin = (struct administrator *)elem->thing;
 		if (str_eq(admin->uuid, uuid)) return admin;
 	}
@@ -1037,7 +1037,7 @@ cJSON *broadcast_announcement(const char *message) {
 
 void drop_all_connections(void) {
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
+	list_foreach_ro(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		user->last_connected_unix = (unsigned)time(NULL);
 		save_user(user);
@@ -1156,7 +1156,7 @@ bool mg_addr_eq(struct mg_addr a, struct mg_addr b) {
 
 struct remote_host *find_host(struct mg_addr addr) {
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_hosts) {
+	list_foreach_ro(elem, g_canvas.connected_hosts) {
 		struct remote_host *host = (struct remote_host *)elem->thing;
 		if (mg_addr_eq(host->addr, addr)) return host;
 	}
@@ -1317,7 +1317,7 @@ static void users_save_timer_fn(void *arg) {
 	logr("Saving %lu users", users);
 	start_transaction();
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
+	list_foreach_ro(elem, g_canvas.connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		save_user(user);
 	}
@@ -1326,15 +1326,14 @@ static void users_save_timer_fn(void *arg) {
 
 	// Check and kick inactive users
 	uint64_t current_time_unix = (unsigned)time(NULL);
-	elem = NULL;
-	list_foreach(elem, g_canvas.connected_users) {
-		struct user *user = (struct user *)elem->thing;
+	list_foreach(g_canvas.connected_users, {
+		struct user *user = (struct user *)arg;
 		size_t sec_since_last_event = current_time_unix - user->last_event_unix;
 		if (sec_since_last_event > g_canvas.settings.kick_inactive_after_sec) {
 			logr("Kicking inactive user %s\n", user->uuid);
 			kick_with_message(user, "You haven't drawn anything for a while, so you were disconnected.", "Reconnect");
 		}
-	}
+	});
 }
 
 static void canvas_save_timer_fn(void *arg) {
@@ -1369,7 +1368,7 @@ static void canvas_save_timer_fn(void *arg) {
 	logr("Saving canvas to disk (%li events) ", list_elems(&g_canvas.delta));
 
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.delta) {
+	list_foreach_ro(elem, g_canvas.delta) {
 		struct tile_placement *p = (struct tile_placement *)elem->thing;
 		int idx = 1;
 		struct tile *tile = &p->tile;
@@ -1604,7 +1603,7 @@ int main(void) {
 	load_config(&g_canvas);
 
 	struct list_elem *elem = NULL;
-	list_foreach(elem, g_canvas.administrators) {
+	list_foreach_ro(elem, g_canvas.administrators) {
 		struct administrator *admin = (struct administrator *)elem->thing;
 
 		if (str_eq(admin->uuid, "<Desired userID here>")) {
