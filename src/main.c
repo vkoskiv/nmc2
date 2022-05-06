@@ -787,10 +787,9 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 }
 
 void drop_user_with_connection(struct mg_connection *c) {
-	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.connected_users) {
-		struct user *user = (struct user *)elem->thing;
-		if (user->socket != c) continue;
+	list_foreach(g_canvas.connected_users, {
+		struct user *user = (struct user *)arg;
+		if (user->socket != c) return;
 		logr("User %s disconnected. (%4lu)\n", user->uuid, list_elems(&g_canvas.connected_users) - 1);
 		user->last_connected_unix = (unsigned)time(NULL);
 		save_user(user);
@@ -800,8 +799,7 @@ void drop_user_with_connection(struct mg_connection *c) {
 			const struct user *list_user = (struct user *)arg;
 			return list_user->socket == user->socket;
 		});
-		break;
-	}
+	});
 	send_user_count();
 }
 
@@ -1037,9 +1035,8 @@ cJSON *broadcast_announcement(const char *message) {
 }
 
 void drop_all_connections(void) {
-	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.connected_users) {
-		struct user *user = (struct user *)elem->thing;
+	list_foreach(g_canvas.connected_users, {
+		struct user *user = (struct user *)arg;
 		user->last_connected_unix = (unsigned)time(NULL);
 		save_user(user);
 		mg_timer_free(&user->tile_increment_timer);
@@ -1049,7 +1046,7 @@ void drop_all_connections(void) {
 			return list_user->socket == user->socket;
 		});
 		send_user_count();
-	}
+	});
 }
 
 cJSON *shut_down_server(void) {
@@ -1646,7 +1643,7 @@ int main(void) {
 	cJSON_InsertItemInArray(payload_array, 0, payload);
 	broadcast(payload_array);
 	cJSON_Delete(payload_array);
-	//drop_all_connections(); // Broken
+	drop_all_connections();
 
 	//FIXME: Hack. Just flush some events before closing
 	for (size_t i = 0; i < 100; ++i) {
