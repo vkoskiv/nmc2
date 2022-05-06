@@ -9,6 +9,8 @@
 #include "vendored/cJSON.h"
 #include "base64.h"
 #include "linked_list.h"
+#include "logging.h"
+#include "fileio.h"
 #include <uuid/uuid.h>
 #include <sqlite3.h>
 #include <stdint.h>
@@ -24,8 +26,6 @@ struct color {
 	uint8_t blue;
 	uint16_t color_id;
 };
-
-void logr(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 
 // Compile-time constants
 #define MAX_NICK_LEN 64
@@ -169,43 +169,6 @@ void sleep_ms(int ms) {
 
 static struct canvas g_canvas;
 static bool g_running = true;
-
-size_t get_file_size(const char *file_path) {
-	FILE *file = fopen(file_path, "r");
-	if (!file) return 0;
-	fseek(file, 0L, SEEK_END);
-	size_t size = ftell(file);
-	fclose(file);
-	return size;
-}
-
-char *load_file(const char *file_path, size_t *bytes) {
-	FILE *file = fopen(file_path, "r");
-	if (!file) {
-		logr("File not found at %s\n", file_path);
-		return NULL;
-	}
-	size_t file_bytes = get_file_size(file_path);
-	if (!file_bytes) {
-		fclose(file);
-		return NULL;
-	}
-	char *buf = malloc(file_bytes + 1 * sizeof(char));
-	size_t read_bytes = fread(buf, sizeof(char), file_bytes, file);
-	if (read_bytes != file_bytes) {
-		logr("Failed to load file at %s\n", file_path);
-		fclose(file);
-		return NULL;
-	}
-	if (ferror(file) != 0) {
-		logr("Error reading file %s\n", file_path);
-	} else {
-		buf[file_bytes] = '\0';
-	}
-	fclose(file);
-	if (bytes) *bytes = read_bytes;
-	return buf;
-}
 
 cJSON *color_to_json(struct color color) {
 	cJSON *c = cJSON_CreateObject();
@@ -1576,21 +1539,6 @@ void sigusr1_handler(int sig) {
 	if (sig == SIGUSR1) {
 		printf("Reeived SIGUSR1, reloading config...\n");
 		load_config(&g_canvas);
-	}
-}
-
-void logr(const char *fmt, ...) {
-	if (!fmt) return;
-	printf("%u ", (unsigned)time(NULL));
-	char buf[1024];
-	int ret = 0;
-	va_list vl;
-	va_start(vl, fmt);
-	ret += vsnprintf(buf, sizeof(buf), fmt, vl);
-	va_end(vl);
-	printf("%s", buf);
-	if (ret > 1024) {
-		printf("...\n");
 	}
 }
 
