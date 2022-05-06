@@ -812,6 +812,7 @@ void kick_with_message(const struct user *user, const char *message, const char 
 	cJSON_AddStringToObject(response, "btn_text", reconnect_btn_text ? reconnect_btn_text : "Reconnect");
 	cJSON_InsertItemInArray(wrapper, 0, response);
 	send_json(wrapper, user);
+	cJSON_Delete(wrapper);
 	drop_user_with_connection(user->socket);
 }
 
