@@ -688,7 +688,7 @@ struct user *user_for_connection(struct mg_connection *c) {
 	return NULL;
 }
 
-struct user *check_and_fetch_user(const char *uuid) {
+struct user *find_in_connected_users(const char *uuid) {
 	struct list_elem *head = NULL;
 	list_foreach_ro(head, g_canvas.connected_users) {
 		struct user *user = (struct user *)head->thing;
@@ -828,7 +828,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	if (strlen(user_id->valuestring) > UUID_STR_LEN) return error_response("Invalid userID");
 
 	// Kick old user if the user opens in more than one browser tab at once.
-	struct user *user = check_and_fetch_user(user_id->valuestring);
+	struct user *user = find_in_connected_users(user_id->valuestring);
 	if (user) {
 		logr("Kicking %s, they opened a new session\n", user->uuid);
 		kick_with_message(user, "It looks like you opened another tab?", "Reconnect here");
@@ -871,7 +871,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 
 cJSON *handle_get_canvas(const cJSON *user_id, bool binary) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
-	struct user *user = check_and_fetch_user(user_id->valuestring);
+	struct user *user = find_in_connected_users(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 
 	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
@@ -943,7 +943,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
 	if (!cJSON_IsString(color_id_param)) return error_response("colorID not a string");
 
-	struct user *user = check_and_fetch_user(user_id->valuestring);
+	struct user *user = find_in_connected_users(user_id->valuestring);
 
 	if (!user) return error_response("Not authenticated");
 	if (user->remaining_tiles < 1) return error_response("No tiles remaining");
@@ -1006,7 +1006,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 // are objects containing colors. *shrug*
 cJSON *handle_get_colors(const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
-	struct user *user = check_and_fetch_user(user_id->valuestring);
+	struct user *user = find_in_connected_users(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 	user->last_event_unix = (unsigned)time(NULL);
 	return cJSON_Parse(g_canvas.color_response_cache);
@@ -1015,7 +1015,7 @@ cJSON *handle_get_colors(const cJSON *user_id) {
 cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	if (!cJSON_IsString(name)) return error_response("No nickname provided");
-	struct user *user = check_and_fetch_user(user_id->valuestring);
+	struct user *user = find_in_connected_users(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
 	logr("User %s set their username to %s\n", user_id->valuestring, name->valuestring);
@@ -1055,7 +1055,7 @@ cJSON *shut_down_server(void) {
 }
 
 cJSON *toggle_shadow_ban(const char *uuid) {
-	struct user *user = check_and_fetch_user(uuid);
+	struct user *user = find_in_connected_users(uuid);
 	if (!user) user = try_load_user(uuid);
 	if (!user) return error_response("No user found with that uuid");
 	logr("Toggling is_shadow_banned to %s for user %s\n", !user->is_shadow_banned ? "true " : "false", uuid);
@@ -1065,7 +1065,7 @@ cJSON *toggle_shadow_ban(const char *uuid) {
 }
 
 cJSON *shadow_ban_user(const char *uuid) {
-	struct user *user = check_and_fetch_user(uuid);
+	struct user *user = find_in_connected_users(uuid);
 	if (!user) user = try_load_user(uuid);
 	if (!user) return error_response("No user found with that uuid");
 	logr("Setting is_shadow_banned to true for user %s\n", uuid);
@@ -1089,7 +1089,7 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
 
 	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
-	struct user *user = check_and_fetch_user(tile->last_modifier);
+	struct user *user = find_in_connected_users(tile->last_modifier);
 	if (!user) user = try_load_user(tile->last_modifier);
 	if (!user) return error_response("Couldn't find a user who modified that tile.");
 	if (user->is_shadow_banned) return error_response("Already shadowbanned from there");
