@@ -689,9 +689,6 @@ void init_rate_limiter(struct rate_limiter *limiter, float max_rate, float per_s
 }
 
 cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *host) {
-
-	//FIXME: We should guarantee this is always provided
-	//Fall back to c->peer if X-Forwarded-For wasn't found.
 	if (host) {
 		logr("Received initialAuth from %s\n", socket->label);
 		host->total_accounts++;
@@ -1155,14 +1152,16 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	cJSON *response = NULL;
 	if (str_eq(reqstr, "initialAuth")) {
 		if (strlen(connection->label)) {
-			// ^This means w're behind a proxy, and this connection was opened with a
-			// X-Forwarded-For header.
 			struct mg_addr remote_addr;
 			if (mg_aton(mg_str(connection->label), &remote_addr)) {
 				struct remote_host *host = find_host(remote_addr);
 				response = handle_initial_auth(connection, host);
+			} else {
+				logr("Failed to convert peer address\n");
+				response = handle_initial_auth(connection, NULL);
 			}
 		} else {
+			logr("No peer address\n");
 			response = handle_initial_auth(connection, NULL);
 		}
 	} else if (str_eq(reqstr, "auth")) {
@@ -1193,6 +1192,10 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 	if (event_type == MG_EV_HTTP_MSG) {
 		struct mg_http_message *msg = (struct mg_http_message *)event_data;
 		if (mg_http_match_uri(msg, "/ws")) {
+			// This block here grabs the client IP address and stores it in the
+			// mg_connection.label convenience string provided by mongoose.
+			// We only use IPs as an identifier to prevent abuse by limiting
+			// how many accounts a single IP can generate.
 			struct mg_str *fwd_header = mg_http_get_header(msg, "X-Forwarded-For");
 			if (fwd_header) {
 				struct mg_str copy = mg_strdup(*fwd_header);
@@ -1206,6 +1209,8 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 				// This is ugly, and I had to cast away a const as well.
 				// Mongoose doesn't have a mg_str_free() and mg_commalist messes with this too :(
 				free(stash);
+			} else {
+				mg_ntoa(&c->peer, c->label, sizeof(c->label));
 			}
 			mg_ws_upgrade(c, msg, NULL);
 		} else if (mg_http_match_uri(msg, "/canvas")) {
