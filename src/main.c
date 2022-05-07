@@ -181,7 +181,7 @@ cJSON *color_to_json(struct color color) {
 
 cJSON *base_response(const char *type) {
 	cJSON *payload = cJSON_CreateObject();
-	cJSON_AddStringToObject(payload, "responseType", type);
+	cJSON_AddStringToObject(payload, "rt", type);
 	return payload;
 }
 
@@ -466,8 +466,8 @@ static void user_tile_increment_fn(void *arg) {
 	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
 	if (user->remaining_tiles == user->max_tiles) return;
 	user->remaining_tiles++;
-	cJSON *response = base_response("incrementTileCount");
-	cJSON_AddNumberToObject(response, "amount", 1);
+	cJSON *response = base_response("itc");
+	cJSON_AddNumberToObject(response, "a", 1);
 	send_json(response, user);
 	cJSON_Delete(response);
 }
@@ -743,13 +743,11 @@ void drop_user_with_connection(struct mg_connection *c) {
 }
 
 void kick_with_message(const struct user *user, const char *message, const char *reconnect_btn_text) {
-	cJSON *wrapper = cJSON_CreateArray();
 	cJSON *response = base_response("kicked");
 	cJSON_AddStringToObject(response, "message", message ? message : "Kicked");
 	cJSON_AddStringToObject(response, "btn_text", reconnect_btn_text ? reconnect_btn_text : "Reconnect");
-	cJSON_InsertItemInArray(wrapper, 0, response);
-	send_json(wrapper, user);
-	cJSON_Delete(wrapper);
+	send_json(response, user);
+	cJSON_Delete(response);
 	drop_user_with_connection(user->socket);
 }
 
@@ -806,7 +804,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 
 uint8_t *handle_get_canvas_bin(const cJSON *user_id, size_t *bin_length) {
 	if (!cJSON_IsString(user_id)) return NULL;
-	struct user *user = check_and_fetch_user(user_id->valuestring);
+	struct user *user = find_in_connected_users(user_id->valuestring);
 	if (!user) return NULL;	
 	
 	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
@@ -898,10 +896,10 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 }
 
 cJSON *new_tile_update(size_t x, size_t y, size_t color_id) {
-	cJSON *response = base_response("tileUpdate");
-	cJSON_AddNumberToObject(response, "X", x);
-	cJSON_AddNumberToObject(response, "Y", y);
-	cJSON_AddNumberToObject(response, "colorID", color_id);
+	size_t idx = x + y * g_canvas.edge_length;
+	cJSON *response = base_response("tu");
+	cJSON_AddNumberToObject(response, "i", idx);
+	cJSON_AddNumberToObject(response, "c", color_id);
 	return response;
 }
 
