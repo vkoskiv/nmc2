@@ -642,15 +642,6 @@ struct user *try_load_user(const char *uuid) {
 	return user;
 }
 
-struct user *user_for_connection(struct mg_connection *c) {
-	struct list_elem *head = NULL;
-	list_foreach_ro(head, g_canvas.connected_users) {
-		struct user *user = (struct user *)head->thing;
-		if (user->socket == c) return user;
-	}
-	return NULL;
-}
-
 struct user *find_in_connected_users(const char *uuid) {
 	struct list_elem *head = NULL;
 	list_foreach_ro(head, g_canvas.connected_users) {
