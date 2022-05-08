@@ -463,7 +463,7 @@ static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
 	// tile_regen_seconds may change in level_up(), so keep it updated here.
 	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
-	if (user->remaining_tiles == user->max_tiles) return;
+	if (user->remaining_tiles >= user->max_tiles) return;
 	user->remaining_tiles++;
 	cJSON *response = base_response("itc");
 	cJSON_AddNumberToObject(response, "a", 1);
