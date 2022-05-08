@@ -7,7 +7,6 @@
 
 #include "vendored/mongoose.h"
 #include "vendored/cJSON.h"
-#include "base64.h"
 #include "linked_list.h"
 #include "logging.h"
 #include "fileio.h"
@@ -802,97 +801,44 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	return response;
 }
 
-uint8_t *handle_get_canvas_bin(const cJSON *user_id, size_t *bin_length) {
-	if (!cJSON_IsString(user_id)) return NULL;
-	struct user *user = find_in_connected_users(user_id->valuestring);
-	if (!user) return NULL;	
-	
-	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
-	if (!within_limit) {
-		logr("CANVAS rate limit exceeded\n");
-		return NULL;
-	}
-	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
-	struct timeval tmr;
-	gettimeofday(&tmr, NULL);
-
-	uint8_t *pixels = calloc(tilecount, 1);
-	for (size_t i = 0; i < tilecount; ++i) {
-		pixels[i] = g_canvas.tiles[i].color_id;
-	}
-
-	size_t compressed_len = compressBound(tilecount);
-	uint8_t *compressed = malloc(compressed_len);
-	logr("Compressing with initial: %lu...\n", compressed_len);
-	int ret = compress(compressed, &compressed_len, pixels, tilecount);
-	if (ret != Z_OK) {
-		if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
-		if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
-	}
-	/*
-	uint8_t *uncompressed = calloc(tilecount, 1);
-	size_t uncompressed_len = tilecount;
-	logr("Uncompressing...\n");
-	ret = uncompress(uncompressed, &uncompressed_len, compressed, compressed_len);
-	if (ret != Z_OK) {
-		if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
-		if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
-		if (ret == Z_DATA_ERROR) logr("Z_DATA_ERROR\n");
-	}
-
-	int bab = memcmp(pixels, uncompressed, tilecount);
-	if (bab == 0) {
-		logr("Match!\n");
-	} else {
-		logr("memcmp() returned %i\n", bab);
-	}
-	*/
-	long ms = get_ms_delta(tmr);
-	logr("gather, pack took %lums\n", ms);
-
-	free(pixels);
-	if (bin_length) *bin_length = compressed_len;
-	return compressed;
-}
-
 cJSON *handle_get_canvas(const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = find_in_connected_users(user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
-
+	
 	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
 	if (!within_limit) {
-		logr("CANVAS rate limit exceeded\n");
+		logr("%s exceeded canvas rate limit\n", user->uuid);
 		return error_response("Rate limit exceeded");
 	}
-	user->last_event_unix = (unsigned)time(NULL);
-	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
 
+	user->last_event_unix = (unsigned)time(NULL);
+
+	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
 	struct timeval tmr;
 	gettimeofday(&tmr, NULL);
-	uint8_t *pixels = calloc(tilecount, 1);
+
+	uint8_t *pixels = malloc(tilecount);
 	for (size_t i = 0; i < tilecount; ++i) {
 		pixels[i] = g_canvas.tiles[i].color_id;
 	}
 
 	size_t compressed_len = compressBound(tilecount);
+	float orig_len = compressed_len;
 	uint8_t *compressed = malloc(compressed_len);
 	int ret = compress(compressed, &compressed_len, pixels, tilecount);
+	float compression_ratio = 100.0f * ((float)compressed_len / orig_len);
+	free(pixels);
 	if (ret != Z_OK) {
 		if (ret == Z_MEM_ERROR) logr("Z_MEM_ERROR\n");
 		if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
 	}
 
-	char *zlib_b64_encoded = b64encode(compressed, compressed_len);
-	cJSON *response = base_response("fullCanvas");
-	cJSON *content = cJSON_CreateString(zlib_b64_encoded);
-	cJSON_AddItemToObject(response, "payload", content);
-	free(pixels);
-	free(zlib_b64_encoded);
-	free(compressed);
 	long ms = get_ms_delta(tmr);
-	logr("Sending zlib'd canvas to %s. (%lums)\n", user->uuid, ms);
-	return response;
+	logr("Sending zlib'd canvas to %s. (%.2f%%, %lub, %lums)\n", user->uuid, compression_ratio, compressed_len, ms);
+	mg_ws_send(user->socket, (char *)compressed, compressed_len, WEBSOCKET_OP_BINARY);
+	free(compressed);
+	return NULL;
 }
 
 cJSON *new_tile_update(size_t x, size_t y, size_t color_id) {
