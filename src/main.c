@@ -1161,15 +1161,6 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 				mg_ntoa(&c->peer, c->label, sizeof(c->label));
 			}
 			mg_ws_upgrade(c, msg, NULL);
-		} else if (mg_http_match_uri(msg, "/canvas")) {
-			//TODO: Return canvas encoded as a PNG
-			mg_http_reply(c, 200, "", "Unimplemented");
-		} else if (mg_http_match_uri(msg, "/message")) {
-			//TODO: Handle message
-			mg_http_reply(c, 200, "", "Unimplemented");
-		} else if (mg_http_match_uri(msg, "/shutdown")) {
-			//TODO: Handle shutdown
-			mg_http_reply(c, 200, "", "Unimplemented");
 		} else if (mg_http_match_uri(msg, "/brew_coffee")) {
 			mg_http_reply(c, 418, "", "Sorry, can't do that. :(");
 		}
