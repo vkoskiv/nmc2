@@ -385,8 +385,8 @@ void broadcast(const cJSON *payload) {
 
 cJSON *error_response(char *error_message) {
 	cJSON *error = cJSON_CreateObject();
-	cJSON_AddStringToObject(error, "responseType", "error");
-	cJSON_AddStringToObject(error, "errorMessage", error_message);
+	cJSON_AddStringToObject(error, "rt", "error");
+	cJSON_AddStringToObject(error, "msg", error_message);
 	return error;
 }
 
