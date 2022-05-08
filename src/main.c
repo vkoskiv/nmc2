@@ -835,7 +835,9 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 	}
 
 	long ms = get_ms_delta(tmr);
-	logr("Sending zlib'd canvas to %s. (%.2f%%, %lub, %lums)\n", user->uuid, compression_ratio, compressed_len, ms);
+	char buf[64];
+	human_file_size(compressed_len, buf);
+	logr("Sending zlib'd canvas to %s. (%.2f%%, %s, %lums)\n", user->uuid, compression_ratio, buf, ms);
 	mg_ws_send(user->socket, (char *)compressed, compressed_len, WEBSOCKET_OP_BINARY);
 	free(compressed);
 	return NULL;
