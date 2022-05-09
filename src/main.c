@@ -99,6 +99,7 @@ struct administrator {
 	bool can_announce;
 	bool can_shadowban;
 	bool can_banclick;
+	bool can_cleanup;
 };
 
 struct canvas {
@@ -305,16 +306,18 @@ void load_config(struct canvas *c) {
 		cJSON *announce = cJSON_GetObjectItem(admin, "announce");
 		cJSON *shadowban = cJSON_GetObjectItem(admin, "shadowban");
 		cJSON *banclick = cJSON_GetObjectItem(admin, "banclick");
+		cJSON *cleanup = cJSON_GetObjectItem(admin, "cleanup");
 		if (!cJSON_IsString(uuid)) continue;
 		if (!cJSON_IsBool(shutdown)) continue;
 		if (!cJSON_IsBool(announce)) continue;
 		if (!cJSON_IsBool(shadowban)) continue;
 		if (!cJSON_IsBool(banclick)) continue;
 		struct administrator a = (struct administrator){
-			.can_shutdown = shutdown->valueint,
-			.can_announce = announce->valueint,
-			.can_shadowban = shadowban->valueint,
-			.can_banclick = banclick->valueint
+			.can_shutdown  = cJSON_IsBool(shutdown)  ? shutdown->valueint  : false,
+			.can_announce  = cJSON_IsBool(announce)  ? announce->valueint  : false,
+			.can_shadowban = cJSON_IsBool(shadowban) ? shadowban->valueint : false,
+			.can_banclick  = cJSON_IsBool(banclick)  ? banclick->valueint  : false,
+			.can_cleanup   = cJSON_IsBool(cleanup)   ? cleanup->valueint   : false,
 		};
 		strncpy(a.uuid, uuid->valuestring, sizeof(a.uuid) - 1);
 		list_append(g_canvas.administrators, a);
@@ -797,7 +800,8 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
 	struct administrator *admin = find_in_admins(uptr->uuid);
-	cJSON_AddBoolToObject(response, "isAdministrator", admin != NULL);
+	cJSON_AddBoolToObject(response, "showBanBtn", admin->can_banclick);
+	cJSON_AddBoolToObject(response, "showCleanupBtn", admin->can_cleanup);
 	return response;
 }
 
@@ -1011,10 +1015,62 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 	logr("User %s shadowbanned from (%4lu,%4lu)\n", user->uuid, x, y);
 	user->is_shadow_banned = true;
 	save_user(user);
-	cJSON *wrapper = cJSON_CreateArray();
-	cJSON *payload = base_response("ban_click_success");
-	cJSON_InsertItemInArray(wrapper, 0, payload);
-	return wrapper;
+	
+	return base_response("ban_click_success");
+}
+
+static void admin_place_tile(int x, int y, const char *uuid) {
+	// Ideally we'd get this based on the color list
+	size_t color_id = 3;
+
+	if ((size_t)x > g_canvas.edge_length - 1) return;
+	if ((size_t)y > g_canvas.edge_length - 1) return;
+	if (x < 0) return;
+	if (y < 0) return;
+
+	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
+	if (tile->color_id == color_id) return;
+	tile->color_id = color_id;
+	tile->place_time_unix = (unsigned)time(NULL);
+	memcpy(tile->last_modifier, uuid, sizeof(tile->last_modifier));
+
+	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
+	logr("Received request: {\"requestType\":\"postTile\",\"userID\":\"%s\",\"X\":%i,\"Y\":%i,\"colorID\":\"%lu\"}\n", uuid, x, y, color_id);
+	
+	// Record delta for persistence. These get flushed to disk every canvas_save_interval_sec seconds.
+	struct tile_placement placement = {
+		.x = x,
+		.y = y,
+		.tile = *tile
+	};
+	list_append(g_canvas.delta, placement);
+
+	g_canvas.dirty = true;
+
+	cJSON *update = new_tile_update(x, y, color_id);
+	broadcast(update);
+	cJSON_Delete(update);
+}
+
+cJSON *handle_admin_brush(const cJSON *coordinates, const char *uuid) {
+	if (!cJSON_IsArray(coordinates)) return error_response("No valid coordinates provided");
+	if (cJSON_GetArraySize(coordinates) < 2) return error_response("No valid coordinates provided");
+	cJSON *x_param = cJSON_GetArrayItem(coordinates, 0);
+	cJSON *y_param = cJSON_GetArrayItem(coordinates, 1);
+	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
+	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
+
+	size_t x = x_param->valueint;
+	size_t y = y_param->valueint;
+
+	for (int diffX = -3; diffX < 4; ++diffX) {
+		for (int diffY = -3; diffY < 4; ++diffY) {
+			admin_place_tile(x + diffX, y + diffY, uuid);
+		}
+	}
+
+	cJSON *payload = base_response("brush_success");
+	return payload;
 }
 
 cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
@@ -1056,6 +1112,9 @@ cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 		} else {
 			return error_response("You don't have banclick permission");
 		}
+	}
+	if (str_eq(action->valuestring, "brush")) {
+		return handle_admin_brush(coordinates, admin->uuid);
 	}
 	return error_response("Unknown admin action invoked");
 }

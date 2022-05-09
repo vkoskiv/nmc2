@@ -15,7 +15,8 @@
 			"shutdown": true,
 			"announce": true,
 			"shadowban": true,
-			"banclick": true
+			"banclick": true,
+			"cleanup": true
 		}
 	],
 	"listen_url": "ws://0.0.0.0:3001",
