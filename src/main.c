@@ -1217,11 +1217,8 @@ void commit_transaction() {
 
 static void users_save_timer_fn(void *arg) {
 	(void)arg;
-	struct timeval timer;
-	gettimeofday(&timer, NULL);
 	size_t users = list_elems(&g_canvas.connected_users);
 	if (!users) return;
-	logr("Saving %lu users", users);
 	start_transaction();
 	struct list_elem *elem = NULL;
 	list_foreach_ro(elem, g_canvas.connected_users) {
@@ -1229,7 +1226,6 @@ static void users_save_timer_fn(void *arg) {
 		save_user(user);
 	}
 	commit_transaction();
-	printf(" (%lums)\n", get_ms_delta(timer));
 
 	// Check and kick inactive users
 	uint64_t current_time_unix = (unsigned)time(NULL);
