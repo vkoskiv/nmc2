@@ -800,8 +800,10 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
 	struct administrator *admin = find_in_admins(uptr->uuid);
-	cJSON_AddBoolToObject(response, "showBanBtn", admin->can_banclick);
-	cJSON_AddBoolToObject(response, "showCleanupBtn", admin->can_cleanup);
+	if (admin) {
+		cJSON_AddBoolToObject(response, "showBanBtn", admin->can_banclick);
+		cJSON_AddBoolToObject(response, "showCleanupBtn", admin->can_cleanup);
+	}
 	return response;
 }
 
