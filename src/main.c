@@ -861,7 +861,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
 	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
-	if (!cJSON_IsString(color_id_param)) return error_response("colorID not a string");
+	if (!cJSON_IsNumber(color_id_param)) return error_response("colorID not a number");
 
 	struct user *user = find_in_connected_users(user_id->valuestring);
 
@@ -872,11 +872,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 		return NULL;
 	}
 
-	//Another ugly detail, the client sends the colorID number as a string...
-	uintmax_t num = strtoumax(color_id_param->valuestring, NULL, 10);
-	if (num == UINTMAX_MAX && errno == ERANGE) return error_response("colorID not a valid number in a string");
-
-	size_t color_id = num;
+	size_t color_id = color_id_param->valueint;
 	size_t x = x_param->valueint;
 	size_t y = y_param->valueint;
 
