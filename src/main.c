@@ -1017,10 +1017,7 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 	return base_response("ban_click_success");
 }
 
-static void admin_place_tile(int x, int y, const char *uuid) {
-	// Ideally we'd get this based on the color list
-	size_t color_id = 3;
-
+static void admin_place_tile(int x, int y, size_t color_id, const char *uuid) {
 	if ((size_t)x > g_canvas.edge_length - 1) return;
 	if ((size_t)y > g_canvas.edge_length - 1) return;
 	if (x < 0) return;
@@ -1050,20 +1047,24 @@ static void admin_place_tile(int x, int y, const char *uuid) {
 	cJSON_Delete(update);
 }
 
-cJSON *handle_admin_brush(const cJSON *coordinates, const char *uuid) {
+cJSON *handle_admin_brush(const cJSON *coordinates, const cJSON *colorID, const char *uuid) {
 	if (!cJSON_IsArray(coordinates)) return error_response("No valid coordinates provided");
+	if (!cJSON_IsNumber(colorID)) return error_response("colorID not a number");
 	if (cJSON_GetArraySize(coordinates) < 2) return error_response("No valid coordinates provided");
 	cJSON *x_param = cJSON_GetArrayItem(coordinates, 0);
 	cJSON *y_param = cJSON_GetArrayItem(coordinates, 1);
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
 	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
 
+	size_t color_id = colorID->valueint;
 	size_t x = x_param->valueint;
 	size_t y = y_param->valueint;
 
+	if (color_id > g_canvas.color_list.amount - 1) return error_response("Invalid colorID");
+
 	for (int diffX = -3; diffX < 4; ++diffX) {
 		for (int diffY = -3; diffY < 4; ++diffY) {
-			admin_place_tile(x + diffX, y + diffY, uuid);
+			admin_place_tile(x + diffX, y + diffY, color_id, uuid);
 		}
 	}
 
@@ -1082,6 +1083,7 @@ cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	const cJSON *action = cJSON_GetObjectItem(command, "action");	
 	const cJSON *message = cJSON_GetObjectItem(command, "message");
 	const cJSON *coordinates = cJSON_GetObjectItem(command, "coords");
+	const cJSON *colorID = cJSON_GetObjectItem(command, "colorID");
 	if (!cJSON_IsString(action)) return error_response("Invalid command action");
 	if (str_eq(action->valuestring, "shutdown")) {
 		if (admin->can_shutdown) {
@@ -1112,7 +1114,7 @@ cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 		}
 	}
 	if (str_eq(action->valuestring, "brush")) {
-		return handle_admin_brush(coordinates, admin->uuid);
+		return handle_admin_brush(coordinates, colorID, admin->uuid);
 	}
 	return error_response("Unknown admin action invoked");
 }
