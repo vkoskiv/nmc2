@@ -17,6 +17,9 @@ ws = create_connection(sys.argv[1])
 
 payload = {'requestType': 'admin_cmd', 'userID': admin_uuid, 'cmd': {'action': 'shutdown'}}
 ws.send(json.dumps(payload))
-result = ws.recv()
-print("Received '%s'" % result)
+try:
+	result = ws.recv()
+	print("Received '%s'" % result)
+except:
+	print("Connection lost. I guess it worked, then?")
 ws.close()
