@@ -29,14 +29,16 @@ struct color {
 // Compile-time constants
 #define MAX_NICK_LEN 64
 
+#define UNUSED_VAL 41414141
+
 // Useful for testing, but be careful with this
 //#define DISABLE_RATE_LIMITING
 
 struct rate_limiter {
 	struct timeval last_event_time;
 	float current_allowance;
-	float max_rate;
-	float per_seconds;
+	float *max_rate;
+	float *per_seconds;
 };
 
 struct user {
@@ -140,13 +142,20 @@ bool is_within_rate_limit(struct rate_limiter *limiter) {
 	(void)limiter;
 	return true;
 #else
+	if (!limiter->max_rate) {
+		logr("WHOA! Rate limiter has no max_rate set!\n");
+		return false;
+	}
+	if (!limiter->per_seconds) {
+		logr("WHOA! Rate limiter has no per_seconds set!\n");
+		return false;
+	}
 	bool is_within_limit = true;
-	long ms_since_last_tile = get_ms_delta(limiter->last_event_time);
+	long ms_since_last_event = get_ms_delta(limiter->last_event_time);
 	gettimeofday(&limiter->last_event_time, NULL);
-	float secs_since_last = (float)ms_since_last_tile / 1000.0f;
-	
-	limiter->current_allowance += secs_since_last * (limiter->max_rate / limiter->per_seconds);
-	if (limiter->current_allowance > limiter->max_rate) limiter->current_allowance = limiter->max_rate;
+	float secs_since_last = (float)ms_since_last_event / 1000.0f;
+	limiter->current_allowance += secs_since_last * (*limiter->max_rate / *limiter->per_seconds);
+	if (limiter->current_allowance > *limiter->max_rate) limiter->current_allowance = *limiter->max_rate;
 	if (limiter->current_allowance < 1.0f) {
 		is_within_limit = false;
 	} else {
@@ -443,13 +452,13 @@ void save_user(const struct user *user) {
 	ret = sqlite3_bind_int(query, idx++, user->canvas_limiter.last_event_time.tv_sec);
 	ret = sqlite3_bind_int64(query, idx++, user->canvas_limiter.last_event_time.tv_usec);
 	ret = sqlite3_bind_double(query, idx++, user->canvas_limiter.current_allowance);
-	ret = sqlite3_bind_double(query, idx++, user->canvas_limiter.max_rate);
-	ret = sqlite3_bind_double(query, idx++, user->canvas_limiter.per_seconds);
+	ret = sqlite3_bind_double(query, idx++, UNUSED_VAL);
+	ret = sqlite3_bind_double(query, idx++, UNUSED_VAL);
 	ret = sqlite3_bind_int(query, idx++, user->tile_limiter.last_event_time.tv_sec);
 	ret = sqlite3_bind_int64(query, idx++, user->tile_limiter.last_event_time.tv_usec);
 	ret = sqlite3_bind_double(query, idx++, user->tile_limiter.current_allowance);
-	ret = sqlite3_bind_double(query, idx++, user->tile_limiter.max_rate);
-	ret = sqlite3_bind_double(query, idx++, user->tile_limiter.per_seconds);
+	ret = sqlite3_bind_double(query, idx++, UNUSED_VAL);
+	ret = sqlite3_bind_double(query, idx++, UNUSED_VAL);
 	ret = sqlite3_bind_text(query, idx++, user->uuid, strlen(user->uuid), NULL);
 
 	ret = sqlite3_step(query);
@@ -545,13 +554,13 @@ void add_user(const struct user *user) {
 	sqlite3_bind_int(query, idx++, user->canvas_limiter.last_event_time.tv_sec);
 	sqlite3_bind_int64(query, idx++, user->canvas_limiter.last_event_time.tv_usec);
 	sqlite3_bind_double(query, idx++, user->canvas_limiter.current_allowance);
-	sqlite3_bind_double(query, idx++, user->canvas_limiter.max_rate);
-	sqlite3_bind_double(query, idx++, user->canvas_limiter.per_seconds);
+	sqlite3_bind_double(query, idx++, UNUSED_VAL);
+	sqlite3_bind_double(query, idx++, UNUSED_VAL);
 	sqlite3_bind_int(query, idx++, user->tile_limiter.last_event_time.tv_sec);
 	sqlite3_bind_int64(query, idx++, user->tile_limiter.last_event_time.tv_usec);
 	sqlite3_bind_double(query, idx++, user->tile_limiter.current_allowance);
-	sqlite3_bind_double(query, idx++, user->tile_limiter.max_rate);
-	sqlite3_bind_double(query, idx++, user->tile_limiter.per_seconds);
+	sqlite3_bind_double(query, idx++, UNUSED_VAL);
+	sqlite3_bind_double(query, idx++, UNUSED_VAL);
 
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
@@ -626,13 +635,11 @@ struct user *try_load_user(const char *uuid) {
 		user->canvas_limiter.last_event_time.tv_sec = sqlite3_column_int(query, i++);
 		user->canvas_limiter.last_event_time.tv_usec = sqlite3_column_int64(query, i++);
 		user->canvas_limiter.current_allowance = sqlite3_column_double(query, i++);
-		user->canvas_limiter.max_rate = sqlite3_column_double(query, i++);
-		user->canvas_limiter.per_seconds = sqlite3_column_double(query, i++);
+		i += 2;
 		user->tile_limiter.last_event_time.tv_sec = sqlite3_column_int(query, i++);
 		user->tile_limiter.last_event_time.tv_usec = sqlite3_column_int64(query, i++);
 		user->tile_limiter.current_allowance = sqlite3_column_double(query, i++);
-		user->tile_limiter.max_rate = sqlite3_column_double(query, i++);
-		user->tile_limiter.per_seconds = sqlite3_column_double(query, i++);
+		i += 2;
 	}
 	sqlite3_finalize(query);
 	return user;
@@ -668,9 +675,13 @@ void level_up(struct user *user) {
 	cJSON_Delete(response);
 }
 
-void init_rate_limiter(struct rate_limiter *limiter, float max_rate, float per_seconds) {
-	*limiter = (struct rate_limiter){ .current_allowance = max_rate, .max_rate = max_rate, .per_seconds = per_seconds };
-	gettimeofday(&limiter->last_event_time, NULL);
+void assign_rate_limiter_limit(struct rate_limiter *limiter, float *max_rate, float *per_seconds) {
+	if (!max_rate || !per_seconds) {
+		logr("WHOA! Trying to init a rate limiter with invalid params\n");
+		return;
+	}
+	limiter->max_rate = max_rate;
+	limiter->per_seconds = per_seconds;
 }
 
 cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *host) {
@@ -707,8 +718,12 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	uptr->socket = socket;
 
 	// Set up rate limiting
-	init_rate_limiter(&uptr->canvas_limiter, g_canvas.settings.getcanvas_max_rate, g_canvas.settings.getcanvas_per_seconds);
-	init_rate_limiter(&uptr->tile_limiter, g_canvas.settings.setpixel_max_rate, g_canvas.settings.setpixel_per_seconds);
+	assign_rate_limiter_limit(&uptr->canvas_limiter, &g_canvas.settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
+	assign_rate_limiter_limit(&uptr->tile_limiter, &g_canvas.settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
+	uptr->canvas_limiter.current_allowance = g_canvas.settings.getcanvas_max_rate;
+	uptr->tile_limiter.current_allowance = g_canvas.settings.setpixel_max_rate;
+	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
+	gettimeofday(&uptr->canvas_limiter.last_event_time, NULL);
 	save_user(uptr);
 
 	logr("User %s connected. (%4lu)\n", uptr->uuid, list_elems(&g_canvas.connected_users));
@@ -779,6 +794,8 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	free(user);
 	uptr->socket = socket;
 
+	assign_rate_limiter_limit(&uptr->canvas_limiter, &g_canvas.settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
+	assign_rate_limiter_limit(&uptr->tile_limiter, &g_canvas.settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
 
