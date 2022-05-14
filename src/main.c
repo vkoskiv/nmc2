@@ -383,7 +383,8 @@ void load_config(struct canvas *c) {
 
 	update_color_response_cache(c);
 
-	logr("Loaded conf:\n%s\n", conf);
+	logr("Loaded conf:\n");
+	printf("%s\n", conf);
 	cJSON_Delete(config);
 	free(conf);
 	return;
