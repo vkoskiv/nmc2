@@ -37,4 +37,7 @@ You can find some runtime config options in params.json:
 You can reload the config file at runtime by sending SIGUSR1 to the running process:
 `kill -SIGUSR1 $(pidof nmc2)`
 
+You can tell the running server to save a backup of the database under backups/ by sending SIGUSR2.
+The script backup_db.sh shows you a nice way to run backups with cron
+
 ~~~

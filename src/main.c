@@ -207,6 +207,38 @@ void update_color_response_cache(struct canvas *c) {
 	cJSON_Delete(response_object);
 }
 
+void do_db_backup() {
+	const time_t cur_time = time(NULL);
+	struct tm time = *localtime(&cur_time);
+	char target[128];
+	snprintf(target, sizeof(target), "backups/backup-%d-%02d-%02dT%02d:%02d:%02d.db",
+	time.tm_year + 1900,
+	time.tm_mon + 1,
+	time.tm_mday,
+	time.tm_hour,
+	time.tm_min,
+	time.tm_sec);
+	logr("Backing up db to %s", target);
+	struct timeval tmr;
+	gettimeofday(&tmr, NULL);
+	sqlite3 *target_db;
+	if (sqlite3_open(target, &target_db) != SQLITE_OK) {
+		logr("\nFailed to open db %s for backup.\n", target);
+		return;
+	}
+
+	sqlite3_backup *backup = sqlite3_backup_init(target_db, "main", g_canvas.backing_db, "main");
+	if (backup) {
+		sqlite3_backup_step(backup, -1);
+		sqlite3_backup_finish(backup);
+	}
+
+	sqlite3_close(target_db);
+
+	long ms = get_ms_delta(tmr);
+	printf(" (%lums)\n", ms);
+}
+
 //TODO: Restart timers when those change
 void load_config(struct canvas *c) {
 	size_t file_bytes;
@@ -1560,6 +1592,12 @@ void sigusr1_handler(int sig) {
 	}
 }
 
+void sigusr2_handler(int sig) {
+	if (sig == SIGUSR2) {
+		do_db_backup();
+	}
+}
+
 int main(void) {
 	setbuf(stdout, NULL); // Disable output buffering
 
@@ -1587,6 +1625,10 @@ int main(void) {
 	}
 	if (signal(SIGUSR1, sigusr1_handler) == SIG_ERR) {
 		printf("Failed to register SIGUSR1 handler\n");
+		return -1;
+	}
+	if (signal(SIGUSR2, sigusr2_handler) == SIG_ERR) {
+		printf("Failed to register SIGUSR2 handler\n");
 		return -1;
 	}
 	printf("Using SQLite v%s\n", sqlite3_libversion());
