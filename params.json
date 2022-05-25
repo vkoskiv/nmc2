@@ -9,6 +9,7 @@
 	"users_save_interval_sec": 60,
 	"websocket_ping_interval_sec": 25,
 	"kick_inactive_after_sec": 3600,
+	"max_concurrent_users": 2048,
 	"administrators": [
 		{
 			"uuid": "<Desired userID here>",

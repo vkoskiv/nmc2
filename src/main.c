@@ -80,6 +80,7 @@ struct params {
 	size_t websocket_ping_interval_sec;
 	size_t users_save_interval_sec;
 	size_t kick_inactive_after_sec;
+	size_t max_concurrent_users;
 	char listen_url[128];
 	char dbase_file[PATH_MAX];
 };
@@ -106,6 +107,7 @@ struct administrator {
 
 struct canvas {
 	struct list connected_users;
+	size_t connected_user_count;
 	struct list connected_hosts;
 	struct list administrators;
 	struct list delta;
@@ -303,6 +305,11 @@ void load_config(struct canvas *c) {
 		logr("kick_inactive_after_sec not a number, exiting.\n");
 		goto bail;
 	}
+	const cJSON *max_concurrent = cJSON_GetObjectItem(config, "max_concurrent_users");
+	if (!cJSON_IsNumber(max_concurrent)) {
+		logr("max_concurrent_users not a number, exiting.\n");
+		goto bail;
+	}
 	const cJSON *administrators  = cJSON_GetObjectItem(config, "administrators");
 	if (!cJSON_IsArray(administrators)) {
 		logr("administrators not an array, exiting.\n");
@@ -334,6 +341,7 @@ void load_config(struct canvas *c) {
 	c->settings.websocket_ping_interval_sec = wp_interval->valueint;
 	c->settings.users_save_interval_sec = us_interval->valueint;
 	c->settings.kick_inactive_after_sec = kick_secs->valueint;
+	c->settings.max_concurrent_users = max_concurrent->valueint;
 	strncpy(c->settings.listen_url, listen_url->valuestring, sizeof(c->settings.listen_url) - 1);
 	strncpy(c->settings.dbase_file, dbase_file->valuestring, sizeof(c->settings.dbase_file) - 1);
 
@@ -717,6 +725,33 @@ void assign_rate_limiter_limit(struct rate_limiter *limiter, float *max_rate, fl
 	limiter->per_seconds = per_seconds;
 }
 
+void drop_user_with_connection(struct mg_connection *c) {
+	list_foreach(g_canvas.connected_users, {
+		struct user *user = (struct user *)arg;
+		if (user->socket != c) return;
+		g_canvas.connected_user_count--;
+		logr("User %s disconnected. (%4lu)\n", user->uuid, g_canvas.connected_user_count);
+		user->last_connected_unix = (unsigned)time(NULL);
+		save_user(user);
+		mg_timer_free(&user->tile_increment_timer);
+		user->socket->is_draining = 1;
+		list_remove(g_canvas.connected_users, {
+			const struct user *list_user = (struct user *)arg;
+			return list_user->socket == user->socket;
+		});
+	});
+	send_user_count();
+}
+
+void kick_with_message(const struct user *user, const char *message, const char *reconnect_btn_text) {
+	cJSON *response = base_response("kicked");
+	cJSON_AddStringToObject(response, "message", message ? message : "Kicked");
+	cJSON_AddStringToObject(response, "btn_text", reconnect_btn_text ? reconnect_btn_text : "Reconnect");
+	send_json(response, user);
+	cJSON_Delete(response);
+	drop_user_with_connection(user->socket);
+}
+
 cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *host) {
 	if (host) {
 		logr("Received initialAuth from %s\n", socket->label);
@@ -757,9 +792,15 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	uptr->tile_limiter.current_allowance = g_canvas.settings.setpixel_max_rate;
 	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
 	gettimeofday(&uptr->canvas_limiter.last_event_time, NULL);
-	save_user(uptr);
 
-	logr("User %s connected. (%4lu)\n", uptr->uuid, list_elems(&g_canvas.connected_users));
+	g_canvas.connected_user_count++;
+	if (g_canvas.connected_user_count > g_canvas.settings.max_concurrent_users) {
+		logr("Kicking %s. Server full. (Sad!)\n", uptr->uuid);
+		kick_with_message(uptr, "Sorry, the server is full :(", "Try again");
+		return NULL;
+	}
+
+	logr("User %s connected. (%4lu)\n", uptr->uuid, g_canvas.connected_user_count);
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
@@ -773,32 +814,6 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
 	return response;
-}
-
-void drop_user_with_connection(struct mg_connection *c) {
-	list_foreach(g_canvas.connected_users, {
-		struct user *user = (struct user *)arg;
-		if (user->socket != c) return;
-		logr("User %s disconnected. (%4lu)\n", user->uuid, list_elems(&g_canvas.connected_users) - 1);
-		user->last_connected_unix = (unsigned)time(NULL);
-		save_user(user);
-		mg_timer_free(&user->tile_increment_timer);
-		user->socket->is_draining = 1;
-		list_remove(g_canvas.connected_users, {
-			const struct user *list_user = (struct user *)arg;
-			return list_user->socket == user->socket;
-		});
-	});
-	send_user_count();
-}
-
-void kick_with_message(const struct user *user, const char *message, const char *reconnect_btn_text) {
-	cJSON *response = base_response("kicked");
-	cJSON_AddStringToObject(response, "message", message ? message : "Kicked");
-	cJSON_AddStringToObject(response, "btn_text", reconnect_btn_text ? reconnect_btn_text : "Reconnect");
-	send_json(response, user);
-	cJSON_Delete(response);
-	drop_user_with_connection(user->socket);
 }
 
 struct administrator *find_in_admins(const char *uuid) {
@@ -827,12 +842,19 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	free(user);
 	uptr->socket = socket;
 
+	g_canvas.connected_user_count++;
+	if (g_canvas.connected_user_count > g_canvas.settings.max_concurrent_users) {
+		logr("Kicking %s. Server full. (Sad!)\n", uptr->uuid);
+		kick_with_message(uptr, "Sorry, the server is full :(\n Try again later!", "Try again");
+		return NULL;
+	}
+
 	assign_rate_limiter_limit(&uptr->canvas_limiter, &g_canvas.settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
 	assign_rate_limiter_limit(&uptr->tile_limiter, &g_canvas.settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
 
-	logr("User %s connected. (%4lu)\n", uptr->uuid, list_elems(&g_canvas.connected_users));
+	logr("User %s connected. (%4lu)\n", uptr->uuid, g_canvas.connected_user_count);
 	start_user_timer(uptr, socket->mgr);
 	send_user_count();
 
@@ -967,9 +989,6 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 	return NULL; // The broadcast takes care of this
 }
 
-// The API is a bit weird. Instead of having a responsetype and an array in an object
-// we have an array where the first object is an object containing the responsetype, rest
-// are objects containing colors. *shrug*
 cJSON *handle_get_colors(const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = find_in_connected_users(user_id->valuestring);
@@ -1002,6 +1021,7 @@ void drop_all_connections(void) {
 	list_foreach(g_canvas.connected_users, {
 		struct user *user = (struct user *)arg;
 		user->last_connected_unix = (unsigned)time(NULL);
+		g_canvas.connected_user_count--;
 		save_user(user);
 		mg_timer_free(&user->tile_increment_timer);
 		user->socket->is_draining = 1;
