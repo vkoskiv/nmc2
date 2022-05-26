@@ -45,7 +45,7 @@ struct user {
 	char user_name[MAX_NICK_LEN];
 	char uuid[UUID_STR_LEN + 1];
 	struct mg_connection *socket;
-	struct mg_timer tile_increment_timer;
+	struct mg_timer *tile_increment_timer;
 	bool is_authenticated;
 	bool is_shadow_banned;
 
@@ -106,6 +106,7 @@ struct administrator {
 };
 
 struct canvas {
+	struct mg_mgr mgr;
 	struct list connected_users;
 	size_t connected_user_count;
 	struct list connected_hosts;
@@ -114,9 +115,6 @@ struct canvas {
 	struct tile *tiles;
 	bool dirty;
 	uint32_t edge_length;
-	struct mg_timer ws_ping_timer;
-	struct mg_timer canvas_save_timer;
-	struct mg_timer users_save_timer;
 	sqlite3 *backing_db; // For persistence
 	struct params settings;
 	struct color_list color_list;
@@ -515,7 +513,7 @@ void save_user(const struct user *user) {
 static void user_tile_increment_fn(void *arg) {
 	struct user *user = (struct user *)arg;
 	// tile_regen_seconds may change in level_up(), so keep it updated here.
-	user->tile_increment_timer.period_ms = user->tile_regen_seconds * 1000;
+	user->tile_increment_timer->period_ms = user->tile_regen_seconds * 1000;
 	if (user->remaining_tiles >= user->max_tiles) return;
 	user->remaining_tiles++;
 	cJSON *response = base_response("itc");
@@ -525,8 +523,7 @@ static void user_tile_increment_fn(void *arg) {
 }
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr) {
-	(void)mgr; // Probably not needed
-	mg_timer_init(&user->tile_increment_timer, user->tile_regen_seconds * 1000, MG_TIMER_REPEAT, user_tile_increment_fn, user);
+	user->tile_increment_timer = mg_timer_add(mgr, user->tile_regen_seconds * 1000, MG_TIMER_REPEAT, user_tile_increment_fn, user);
 }
 
 void send_user_count(void) {
@@ -733,7 +730,7 @@ void drop_user_with_connection(struct mg_connection *c) {
 		logr("User %s disconnected. (%4lu)\n", user->uuid, g_canvas.connected_user_count);
 		user->last_connected_unix = (unsigned)time(NULL);
 		save_user(user);
-		mg_timer_free(&user->tile_increment_timer);
+		mg_timer_free(&g_canvas.mgr.timers, user->tile_increment_timer);
 		user->socket->is_draining = 1;
 		list_remove(g_canvas.connected_users, {
 			const struct user *list_user = (struct user *)arg;
@@ -1023,7 +1020,7 @@ void drop_all_connections(void) {
 		user->last_connected_unix = (unsigned)time(NULL);
 		g_canvas.connected_user_count--;
 		save_user(user);
-		mg_timer_free(&user->tile_increment_timer);
+		mg_timer_free(&g_canvas.mgr.timers, user->tile_increment_timer);
 		user->socket->is_draining = 1;
 		list_remove(g_canvas.connected_users, {
 			const struct user *list_user = (struct user *)arg;
@@ -1289,7 +1286,7 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 				// Mongoose doesn't have a mg_str_free() and mg_commalist messes with this too :(
 				free(stash);
 			} else {
-				mg_ntoa(&c->peer, c->label, sizeof(c->label));
+				mg_ntoa(&c->rem, c->label, sizeof(c->label));
 			}
 			mg_ws_upgrade(c, msg, NULL);
 		} else if (mg_http_match_uri(msg, "/brew_coffee")) {
@@ -1657,15 +1654,15 @@ int main(void) {
 		printf("Failed to set up db\n");
 		return -1;
 	}
-	struct mg_mgr mgr;
-	mg_mgr_init(&mgr);
+
+	mg_mgr_init(&g_canvas.mgr);
 	//ws ping loop. TODO: Probably do this from the client side instead.
-	mg_timer_init(&g_canvas.ws_ping_timer, 1000 * g_canvas.settings.websocket_ping_interval_sec, MG_TIMER_REPEAT, ping_timer_fn, &mgr);
-	mg_timer_init(&g_canvas.canvas_save_timer, 1000 * g_canvas.settings.canvas_save_interval_sec, MG_TIMER_REPEAT, canvas_save_timer_fn, &mgr);
-	mg_timer_init(&g_canvas.users_save_timer, 1000 * g_canvas.settings.users_save_interval_sec, MG_TIMER_REPEAT, users_save_timer_fn, &mgr);
+	mg_timer_add(&g_canvas.mgr, 1000 * g_canvas.settings.websocket_ping_interval_sec, MG_TIMER_REPEAT, ping_timer_fn, &g_canvas.mgr);
+	mg_timer_add(&g_canvas.mgr, 1000 * g_canvas.settings.canvas_save_interval_sec, MG_TIMER_REPEAT, canvas_save_timer_fn, &g_canvas.mgr);
+	mg_timer_add(&g_canvas.mgr, 1000 * g_canvas.settings.users_save_interval_sec, MG_TIMER_REPEAT, users_save_timer_fn, &g_canvas.mgr);
 	printf("Starting WS listener on %s/ws\n", g_canvas.settings.listen_url);
-	mg_http_listen(&mgr, g_canvas.settings.listen_url, callback_fn, NULL);
-	while (g_running) mg_mgr_poll(&mgr, 1000);
+	mg_http_listen(&g_canvas.mgr, g_canvas.settings.listen_url, callback_fn, NULL);
+	while (g_running) mg_mgr_poll(&g_canvas.mgr, 1000);
 
 	cJSON *response = base_response("disconnecting");
 	broadcast(response);
@@ -1674,7 +1671,7 @@ int main(void) {
 
 	//FIXME: Hack. Just flush some events before closing
 	for (size_t i = 0; i < 100; ++i) {
-		mg_mgr_poll(&mgr, 1);
+		mg_mgr_poll(&g_canvas.mgr, 1);
 	}
 	logr("Saving canvas one more time...\n");
 	canvas_save_timer_fn(NULL);
@@ -1682,7 +1679,7 @@ int main(void) {
 	users_save_timer_fn(NULL);
 
 	printf("Closing db\n");
-	mg_mgr_free(&mgr);
+	mg_mgr_free(&g_canvas.mgr);
 	free(g_canvas.tiles);
 	free(g_canvas.color_list.colors);
 	free(g_canvas.color_response_cache);
