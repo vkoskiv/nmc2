@@ -22,6 +22,7 @@
 #endif
 
 #include <string.h>
+#include <poll.h>
 
 static int mg_b64idx(int c) {
   if (c < 26) {
@@ -3460,11 +3461,6 @@ static void accept_conn(struct mg_mgr *mgr, struct mg_connection *lsn) {
     if (MG_SOCK_ERRNO != EAGAIN)
 #endif
       LOG(LL_ERROR, ("%lu accept failed, errno %d", lsn->id, MG_SOCK_ERRNO));
-#if (!defined(_WIN32) && (MG_ARCH != MG_ARCH_FREERTOS_TCP))
-  } else if ((long) fd >= FD_SETSIZE) {
-    LOG(LL_ERROR, ("%ld > %ld", (long) fd, (long) FD_SETSIZE));
-    closesocket(fd);
-#endif
   } else if ((c = alloc_conn(mgr, 0, fd)) == NULL) {
     LOG(LL_ERROR, ("%lu OOM", lsn->id));
     closesocket(fd);
@@ -3597,34 +3593,42 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
                     eSELECT_READ | eSELECT_EXCEPT | eSELECT_WRITE);
   }
 #else
-  struct timeval tv = {ms / 1000, (ms % 1000) * 1000};
-  struct mg_connection *c;
-  fd_set rset, wset;
-  SOCKET maxfd = 0;
-  int rc;
+	struct mg_connection *c;
+	size_t connections = 0;
+	for (c = mgr->conns; c != NULL; c = c->next) {
+		connections++;
+	}
+	struct pollfd fds[connections == 0 ? 1 : connections];
 
-  FD_ZERO(&rset);
-  FD_ZERO(&wset);
+	size_t i = 0;
+	for (c = mgr->conns; c != NULL; c = c->next, i++) {
+		if (c->is_closing || c->is_resolving || FD(c) == INVALID_SOCKET) {
+			// Ignore, invalid socket
+		} else {
+			fds[i].fd = FD(c);
+			fds[i].events = 0;
+			fds[i].events |= POLLIN;
+			if (c->is_connecting || (c->send.len > 0 && c->is_tls_hs == 0)) {
+				fds[i].events |= POLLOUT;
+			}
+		}
+	}
 
-  for (c = mgr->conns; c != NULL; c = c->next) {
-    if (c->is_closing || c->is_resolving || FD(c) == INVALID_SOCKET) continue;
-    FD_SET(FD(c), &rset);
-    if (FD(c) > maxfd) maxfd = FD(c);
-    if (c->is_connecting || (c->send.len > 0 && c->is_tls_hs == 0))
-      FD_SET(FD(c), &wset);
-  }
+	int rc;
+	if ((rc = poll(fds, connections, ms)) < 0) {
+		LOG(LL_DEBUG, ("poll: %d %d", rc, MG_SOCK_ERRNO));
+	}
 
-  if ((rc = select((int) maxfd + 1, &rset, &wset, NULL, &tv)) < 0) {
-    LOG(LL_DEBUG, ("select: %d %d", rc, MG_SOCK_ERRNO));
-    FD_ZERO(&rset);
-    FD_ZERO(&wset);
-  }
-
-  for (c = mgr->conns; c != NULL; c = c->next) {
-    // TLS might have stuff buffered, so dig everything
-    c->is_readable = FD(c) != INVALID_SOCKET && FD_ISSET(FD(c), &rset);
-    c->is_writable = FD(c) != INVALID_SOCKET && FD_ISSET(FD(c), &wset);
-  }
+	i = 0;
+	for (c = mgr->conns; c != NULL; c = c->next, i++) {
+		if (c->is_closing || c->is_resolving || FD(c) == INVALID_SOCKET) {
+			// Ignore, invalid socket
+		} else {
+			c->is_readable = (unsigned)(fds[i].revents & POLLIN ? true : false);
+			c->is_writable = (unsigned)(fds[i].revents & POLLOUT ? true : false);
+			fds[i].revents = 0;
+		}
+	}
 #endif
 }
 
