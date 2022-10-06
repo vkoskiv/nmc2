@@ -1376,19 +1376,10 @@ static void canvas_save_timer_fn(void *arg) {
 
 	sqlite3 *db = g_canvas.backing_db;
 	
-	sqlite3_stmt *bt;
-	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
-	int ret = sqlite3_step(bt);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to begin transaction\n");
-		sqlite3_finalize(bt);
-		sqlite3_close(db);
-		exit(-1);
-	}
-	sqlite3_finalize(bt);
+	start_transaction();
 
 	sqlite3_stmt *insert;
-	ret = sqlite3_prepare_v2(db, "UPDATE tiles SET colorID = ?, lastModifier = ?, placeTime = ? WHERE X = ? AND Y = ?", -1, &insert, NULL);
+	int ret = sqlite3_prepare_v2(db, "UPDATE tiles SET colorID = ?, lastModifier = ?, placeTime = ? WHERE X = ? AND Y = ?", -1, &insert, NULL);
 	if (ret != SQLITE_OK) {
 		printf("Failed to prepare tile update: %s\n", sqlite3_errmsg(db));
 		goto bail;
@@ -1427,20 +1418,10 @@ static void canvas_save_timer_fn(void *arg) {
 bail:
 	sqlite3_finalize(insert);
 
-	sqlite3_stmt *et;
-	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
-	ret = sqlite3_step(et);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to commit transaction\n");
-		sqlite3_finalize(et);
-		sqlite3_close(db);
-		exit(-1);
-	} else {
-		long ms = get_ms_delta(timer);
-		printf("(%lims)\n", ms);
-		g_canvas.dirty = false;
-	}
-	sqlite3_finalize(et);
+	commit_transaction();
+	long ms = get_ms_delta(timer);
+	printf("(%lims)\n", ms);
+	g_canvas.dirty = false;
 }
 
 void ensure_tiles_table(sqlite3 *db) {
@@ -1465,16 +1446,7 @@ void ensure_tiles_table(sqlite3 *db) {
 
 	if (rows > 0) return;
 
-	sqlite3_stmt *bt;
-	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
-	ret = sqlite3_step(bt);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to begin transaction\n");
-		sqlite3_finalize(bt);
-		sqlite3_close(db);
-		exit(-1);
-	}
-	sqlite3_finalize(bt);
+	start_transaction();
 
 	logr("Running initial tile db init...\n");
 	sqlite3_stmt *insert;
@@ -1500,16 +1472,7 @@ void ensure_tiles_table(sqlite3 *db) {
 	}
 	sqlite3_finalize(insert);
 
-	sqlite3_stmt *et;
-	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
-	ret = sqlite3_step(et);
-	if (ret != SQLITE_DONE) {
-		printf("Failed to commit transaction\n");
-		sqlite3_finalize(et);
-		sqlite3_close(db);
-		exit(-1);
-	}
-	sqlite3_finalize(et);
+	commit_transaction();
 
 	logr("db init done.\n");
 }
