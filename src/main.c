@@ -1556,26 +1556,20 @@ void (*signal(int signo, void (*func)(int)))(int);
 typedef void sigfunc(int);
 sigfunc *signal(int, sigfunc*);
 
-void sigint_handler(int sig) {
-	if (sig == 2) {
-		printf("Received SIGINT, stopping.\n");
-		g_running = false;
-	} else if (sig == 15) {
-		printf("Received SIGTERM, stopping.\n");
-		g_running = false;
-	}
-}
-
-void sigusr1_handler(int sig) {
-	if (sig == SIGUSR1) {
-		printf("Reeived SIGUSR1, reloading config...\n");
-		load_config(&g_canvas);
-	}
-}
-
-void sigusr2_handler(int sig) {
-	if (sig == SIGUSR2) {
-		do_db_backup();
+void sig_handler(int sig) {
+	switch (sig) {
+		case SIGINT:
+		case SIGTERM:
+			printf("Received SIGTERM, stopping.\n");
+			g_running = false;
+			break;
+		case SIGUSR1:
+			printf("Received SIGUSR1, reloading config...\n");
+			load_config(&g_canvas);
+			break;
+		case SIGUSR2:
+			do_db_backup();
+			break;
 	}
 }
 
@@ -1596,19 +1590,19 @@ int main(void) {
 		}
 	}
 
-	if (signal(SIGINT, sigint_handler) == SIG_ERR) {
+	if (signal(SIGINT, sig_handler) == SIG_ERR) {
 		printf("Failed to register sigint handler\n");
 		return -1;
 	}
-	if (signal(SIGTERM, sigint_handler) == SIG_ERR) {
+	if (signal(SIGTERM, sig_handler) == SIG_ERR) {
 		printf("Failed to register sigterm handler\n");
 		return -1;
 	}
-	if (signal(SIGUSR1, sigusr1_handler) == SIG_ERR) {
+	if (signal(SIGUSR1, sig_handler) == SIG_ERR) {
 		printf("Failed to register SIGUSR1 handler\n");
 		return -1;
 	}
-	if (signal(SIGUSR2, sigusr2_handler) == SIG_ERR) {
+	if (signal(SIGUSR2, sig_handler) == SIG_ERR) {
 		printf("Failed to register SIGUSR2 handler\n");
 		return -1;
 	}
