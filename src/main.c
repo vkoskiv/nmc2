@@ -1478,7 +1478,7 @@ void ensure_tiles_table(sqlite3 *db) {
 }
 
 void ensure_valid_db(sqlite3 *db) {
-	char *schema = load_file("nmc2.sql", NULL);
+	char *schema = load_file("schema.sql", NULL);
 	if (!schema) {
 		exit(-1);
 	}
