@@ -23,7 +23,7 @@ struct color {
 	uint8_t red;
 	uint8_t green;
 	uint8_t blue;
-	uint16_t color_id;
+	uint8_t color_id;
 };
 
 // Compile-time constants
@@ -64,7 +64,7 @@ struct user {
 };
 
 struct tile {
-	uint32_t color_id;
+	uint8_t color_id;
 	uint64_t place_time_unix;
 	char last_modifier[UUID_STR_LEN];
 };
@@ -918,7 +918,7 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 	return NULL;
 }
 
-cJSON *new_tile_update(size_t x, size_t y, size_t color_id) {
+cJSON *new_tile_update(size_t x, size_t y, uint8_t color_id) {
 	size_t idx = x + y * g_canvas.edge_length;
 	cJSON *response = base_response("tu");
 	cJSON_AddNumberToObject(response, "i", idx);
@@ -941,7 +941,7 @@ cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON 
 		return NULL;
 	}
 
-	size_t color_id = color_id_param->valueint;
+	uint8_t color_id = color_id_param->valueint;
 	size_t x = x_param->valueint;
 	size_t y = y_param->valueint;
 
@@ -1084,7 +1084,7 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 	return base_response("ban_click_success");
 }
 
-static void admin_place_tile(int x, int y, size_t color_id, const char *uuid) {
+static void admin_place_tile(int x, int y, uint8_t color_id, const char *uuid) {
 	if ((size_t)x > g_canvas.edge_length - 1) return;
 	if ((size_t)y > g_canvas.edge_length - 1) return;
 	if (x < 0) return;
@@ -1097,7 +1097,7 @@ static void admin_place_tile(int x, int y, size_t color_id, const char *uuid) {
 	memcpy(tile->last_modifier, uuid, sizeof(tile->last_modifier));
 
 	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
-	logr("Received request: {\"requestType\":\"postTile\",\"userID\":\"%s\",\"X\":%i,\"Y\":%i,\"colorID\":\"%lu\"}\n", uuid, x, y, color_id);
+	logr("Received request: {\"requestType\":\"postTile\",\"userID\":\"%s\",\"X\":%i,\"Y\":%i,\"colorID\":\"%u\"}\n", uuid, x, y, color_id);
 	
 	// Record delta for persistence. These get flushed to disk every canvas_save_interval_sec seconds.
 	struct tile_placement placement = {
@@ -1123,7 +1123,7 @@ cJSON *handle_admin_brush(const cJSON *coordinates, const cJSON *colorID, const 
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
 	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
 
-	size_t color_id = colorID->valueint;
+	uint8_t color_id = colorID->valueint;
 	size_t x = x_param->valueint;
 	size_t y = y_param->valueint;
 
