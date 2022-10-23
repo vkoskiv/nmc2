@@ -18,6 +18,7 @@
 #include <math.h>
 #include <signal.h>
 #include <zlib.h>
+#include <pthread.h>
 
 struct color {
 	uint8_t red;
@@ -119,6 +120,11 @@ struct canvas {
 	struct params settings;
 	struct color_list color_list;
 	char *color_response_cache;
+	pthread_t canvas_worker_thread;
+	pthread_mutex_t canvas_cache_lock;
+	uint8_t *canvas_cache;
+	size_t canvas_cache_len;
+	float canvas_cache_compression_ratio;
 };
 
 // rate limiting
@@ -876,22 +882,8 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	return response;
 }
 
-cJSON *handle_get_canvas(const cJSON *user_id) {
-	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
-	struct user *user = find_in_connected_users(user_id->valuestring);
-	if (!user) return error_response("Not authenticated");
-	
-	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
-	if (!within_limit) {
-		logr("%s exceeded canvas rate limit\n", user->uuid);
-		return error_response("Rate limit exceeded");
-	}
-
-	user->last_event_unix = (unsigned)time(NULL);
-
+void update_getcanvas_cache(struct canvas *c) {
 	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
-	struct timeval tmr;
-	gettimeofday(&tmr, NULL);
 
 	uint8_t *pixels = malloc(tilecount);
 	for (size_t i = 0; i < tilecount; ++i) {
@@ -909,12 +901,63 @@ cJSON *handle_get_canvas(const cJSON *user_id) {
 		if (ret == Z_BUF_ERROR) logr("Z_BUF_ERROR\n");
 	}
 
+	uint8_t *old = NULL;
+	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
+	pthread_mutex_lock(&c->canvas_cache_lock);
+	old = c->canvas_cache;
+	c->canvas_cache = compressed;
+	c->canvas_cache_len = compressed_len;
+	c->canvas_cache_compression_ratio = compression_ratio;
+	pthread_mutex_unlock(&c->canvas_cache_lock);
+	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
+	free(old);
+}
+
+void *worker_thread(void *arg) {
+	struct canvas *c = (struct canvas *)arg;
+	while (true) {
+		sleep_ms(1000); //TODO: configurable?
+		// Compress and swap canvas cache data
+		if (!c->dirty) continue;
+		update_getcanvas_cache(c);
+	}
+	return NULL;
+}
+
+cJSON *handle_get_canvas(const cJSON *user_id) {
+	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
+	struct user *user = find_in_connected_users(user_id->valuestring);
+	if (!user) return error_response("Not authenticated");
+
+	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
+	if (!within_limit) {
+		logr("%s exceeded canvas rate limit\n", user->uuid);
+		return error_response("Rate limit exceeded");
+	}
+
+	user->last_event_unix = (unsigned)time(NULL);
+
+	struct timeval tmr;
+	gettimeofday(&tmr, NULL);
+
+	// nab a copy of the data, avoid blocking updates for others.
+	uint8_t *copy;
+	size_t copy_len;
+	float copy_ratio;
+	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
+	pthread_mutex_lock(&g_canvas.canvas_cache_lock);
+	copy_len = g_canvas.canvas_cache_len;
+	copy_ratio = g_canvas.canvas_cache_compression_ratio;
+	copy = malloc(copy_len);
+	memcpy(copy, g_canvas.canvas_cache, copy_len);
+	pthread_mutex_unlock(&g_canvas.canvas_cache_lock);
+	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
 	long ms = get_ms_delta(tmr);
 	char buf[64];
-	human_file_size(compressed_len, buf);
-	logr("Sending zlib'd canvas to %s. (%.2f%%, %s, %lums)\n", user->uuid, compression_ratio, buf, ms);
-	mg_ws_send(user->socket, (char *)compressed, compressed_len, WEBSOCKET_OP_BINARY);
-	free(compressed);
+	human_file_size(copy_len, buf);
+	logr("Sending zlib'd canvas to %s. (%.2f%%, %s, %lums)\n", user->uuid, copy_ratio, buf, ms);
+	mg_ws_send(user->socket, (char *)copy, copy_len, WEBSOCKET_OP_BINARY);
+	free(copy);
 	return NULL;
 }
 
@@ -1573,6 +1616,16 @@ void sig_handler(int sig) {
 	}
 }
 
+void start_worker_thread(struct canvas *c) {
+	pthread_attr_t attribs;
+	pthread_attr_init(&attribs);
+	pthread_attr_setdetachstate(&attribs, PTHREAD_CREATE_JOINABLE);
+	pthread_setname_np(c->canvas_worker_thread, "CanvasCacheWorker");
+	int ret = pthread_create(&c->canvas_worker_thread, &attribs, worker_thread, c);
+	pthread_attr_destroy(&attribs);
+	if (ret < 0) printf("Oops\n");
+}
+
 int main(void) {
 	setbuf(stdout, NULL); // Disable output buffering
 
@@ -1619,6 +1672,9 @@ int main(void) {
 	mg_timer_add(&g_canvas.mgr, 1000 * g_canvas.settings.users_save_interval_sec, MG_TIMER_REPEAT, users_save_timer_fn, &g_canvas.mgr);
 	printf("Starting WS listener on %s/ws\n", g_canvas.settings.listen_url);
 	mg_http_listen(&g_canvas.mgr, g_canvas.settings.listen_url, callback_fn, NULL);
+	// Set up canvas cache and start a background worker to refresh it
+	update_getcanvas_cache(&g_canvas);
+	start_worker_thread(&g_canvas);
 	while (g_running) mg_mgr_poll(&g_canvas.mgr, 1000);
 
 	cJSON *response = base_response("disconnecting");
