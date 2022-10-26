@@ -1255,6 +1255,20 @@ struct remote_host *find_host(struct mg_addr addr) {
 	return host;
 }
 
+struct remote_host *extract_host(struct mg_connection *c) {
+	if (strlen(c->label)) { //TODO: Needed?
+		struct mg_addr remote_addr;
+		if (mg_aton(mg_str(c->label), &remote_addr)) {
+			return find_host(remote_addr);
+		} else {
+			logr("Failed to convert peer address\n");
+		}
+	} else {
+		logr("No peer address\n");
+	}
+	return NULL;
+}
+
 cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connection) {
 	// cmd is not necessarily null-terminated. Trust len.
 	cJSON *command = cJSON_ParseWithLength(cmd, len);
@@ -1272,19 +1286,8 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 
 	cJSON *response = NULL;
 	if (str_eq(reqstr, "initialAuth")) {
-		if (strlen(connection->label)) {
-			struct mg_addr remote_addr;
-			if (mg_aton(mg_str(connection->label), &remote_addr)) {
-				struct remote_host *host = find_host(remote_addr);
-				response = handle_initial_auth(connection, host);
-			} else {
-				logr("Failed to convert peer address\n");
-				response = handle_initial_auth(connection, NULL);
-			}
-		} else {
-			logr("No peer address\n");
-			response = handle_initial_auth(connection, NULL);
-		}
+		struct remote_host *host = extract_host(connection);
+		response = handle_initial_auth(connection, host);
 	} else if (str_eq(reqstr, "auth")) {
 		response = handle_auth(user_id, connection);
 	} else if (str_eq(reqstr, "getCanvas")) {
