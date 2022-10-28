@@ -693,7 +693,7 @@ struct user *find_in_connected_users(const char *uuid) {
 	struct list_elem *head = NULL;
 	list_foreach_ro(head, g_canvas.connected_users) {
 		struct user *user = (struct user *)head->thing;
-		if (str_eq(user->uuid, uuid)) return user;
+		if (strncmp(user->uuid, uuid, UUID_STR_LEN) == 0) return user;
 	}
 	return NULL;
 }
