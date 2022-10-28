@@ -430,6 +430,14 @@ void send_json(const cJSON *payload, const struct user *user) {
 	free(str);
 }
 
+void bin_broadcast(const char *payload, size_t len) {
+	struct list_elem *elem = NULL;
+	list_foreach_ro(elem, g_canvas.connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		mg_ws_send(user->socket, payload, len, WEBSOCKET_OP_BINARY);
+	}
+}
+
 void broadcast(const cJSON *payload) {
 	//FIXME: Make list_foreach more ergonomic
 	struct list_elem *elem = NULL;
@@ -1269,6 +1277,281 @@ struct remote_host *extract_host(struct mg_connection *c) {
 	return NULL;
 }
 
+enum request_type {
+	REQ_INITIAL_AUTH = 0,
+	REQ_AUTH,
+	REQ_GET_CANVAS,
+	REQ_GET_TILE_INFO,
+	REQ_POST_TILE,
+	REQ_GET_COLORS,
+	REQ_SET_USERNAME,
+};
+
+typedef union { char *p; double d; long double ld; long int i; } nmc_max_align_t;
+
+enum response_id {
+	RES_AUTH_SUCCESS = 0,
+	RES_CANVAS,
+	RES_TILE_INFO,
+	RES_TILE_UPDATE,
+	RES_COLOR_LIST,
+	RES_USERNAME_SET_SUCCESS,
+	ERR_INVALID_UUID = 128,
+	ERR_OUT_OF_TILES,
+};
+
+char *ack(enum response_id e) {
+	char *response = malloc(1);
+	*response = (char)e;
+	return response;
+}
+
+char *error(enum response_id e) {
+	return ack(e);
+}
+
+struct request {
+	uint8_t request_type;
+	char uuid[UUID_STR_LEN];
+	uint16_t x;
+	uint16_t y;
+	union {
+		uint16_t color_id;
+		uint16_t data_len;
+	};
+	char data[];
+};
+
+char *handle_req_auth(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	//TODO
+	return NULL;
+}
+
+char *handle_req_get_canvas(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	//TODO
+	return NULL;
+}
+
+char *handle_req_get_tile_info(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	//TODO
+	return NULL;
+}
+
+struct tile_update {
+	uint8_t resp_type;
+	uint8_t color_id;
+	uint16_t x;
+	uint16_t y;
+};
+
+char *bin_tile_update(size_t x, size_t y, uint8_t color_id, size_t *response_len) {
+	struct tile_update u = {
+		.resp_type = RES_TILE_UPDATE,
+		.color_id = color_id,
+		.x = ntohs(x),
+		.y = ntohs(y),
+	};
+	char *resp = malloc(sizeof(u));
+	memcpy(resp, &u, sizeof(u));
+	if (response_len) *response_len = sizeof(u);
+	return resp;
+}
+
+void dump_req(const struct request *req) {
+	printf("request_type: %i\n", req->request_type);
+	printf("uuid        : %.*s\n", UUID_STR_LEN, req->uuid);
+	printf("x           : %i\n", req->x);
+	printf("y           : %i\n", req->y);
+	printf("cld/len     : %i\n", req->color_id);
+}
+
+char *handle_req_post_tile(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	dump_req(req);
+	struct user *user = find_in_connected_users(req->uuid);
+
+	if (!user) return error(ERR_INVALID_UUID);
+	if (user->remaining_tiles < 1) return NULL;
+
+	if (!is_within_rate_limit(&user->tile_limiter)) {
+		return NULL;
+	}
+
+	uint8_t color_id = req->color_id;
+	size_t x = req->x;
+	size_t y = req->y;
+
+	printf("Received binary post: %i, %i, %i\n", x, y, color_id);
+
+	if (x > g_canvas.edge_length - 1) return NULL;
+	if (y > g_canvas.edge_length - 1) return NULL;
+	if (color_id > g_canvas.color_list.amount - 1) return NULL;
+
+	user->remaining_tiles--;
+	user->total_tiles_placed++;
+	user->current_level_progress++;
+	if (user->current_level_progress >= user->tiles_to_next_level) {
+		level_up(user);
+	}
+	user->last_event_unix = (unsigned)time(NULL);
+
+	if (user->is_shadow_banned) {
+		logr("Rejecting request from shadowbanned user: {\"requestType\":\"postTile\",\"userID\":\"%s\",\"X\":%i,\"Y\":%i,\"colorID\":\"%u\"}\n", user->uuid, x, y, color_id);
+		return bin_tile_update(x, y, color_id, response_len);
+	}
+
+	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
+	logr("Received request: {\"requestType\":\"postTile\",\"userID\":\"%s\",\"X\":%i,\"Y\":%i,\"colorID\":\"%u\"}\n", user->uuid, x, y, color_id);
+	
+	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
+	tile->color_id = color_id;
+	tile->place_time_unix = user->last_event_unix;
+	memcpy(tile->last_modifier, user->uuid, sizeof(tile->last_modifier));
+	
+	// Record delta for persistence. These get flushed to disk every canvas_save_interval_sec seconds.
+	struct tile_placement placement = {
+		.x = x,
+		.y = y,
+		.tile = *tile
+	};
+	list_append(g_canvas.delta, placement);
+
+	g_canvas.dirty = true;
+
+	char *resp = bin_tile_update(x, y, color_id, response_len);
+	bin_broadcast(resp, *response_len);
+	free(resp);
+	return NULL; // The broadcast takes care of this
+}
+
+char *handle_req_get_colors(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	printf("Got to colorlist thing\n");
+	struct user *user = find_in_connected_users(req->uuid);
+	if (!user) return error(ERR_INVALID_UUID);
+
+	user->last_event_unix = (unsigned)time(NULL);
+	//TODO: cache as well maybe
+
+	char *response = malloc(1 + g_canvas.color_list.amount * sizeof(struct color));
+	response[0] = RES_COLOR_LIST;
+	struct color *list = (struct color *)response + 1;
+	for (size_t i = 0; i < g_canvas.color_list.amount; ++i) {
+		list[i] = g_canvas.color_list.colors[i];
+	}
+	return response;
+}
+
+char *handle_req_set_username(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	//TODO
+	return NULL;
+}
+
+struct initial_auth_response {
+	uint8_t response_type;
+	uint32_t remaining_tiles;
+	uint32_t max_tiles;
+	uint32_t tiles_to_next_level;
+	uint32_t current_level_progress;
+	uint8_t level;
+	char uuid[UUID_STR_LEN];
+};
+
+char *handle_req_initial_auth(const struct request *req, struct mg_connection *socket, size_t *response_len, struct remote_host *host) {
+	return NULL;
+	if (host) {
+		logr("Received initialAuth from %s\n", socket->label);
+		host->total_accounts++;
+		save_host(host);
+		if (host->total_accounts > g_canvas.settings.max_users_per_ip) {
+			char ip_buf[50];
+			mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
+			logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, g_canvas.settings.max_users_per_ip);
+			return error_response("Maximum users reached for this IP (contact vkoskiv if you think this is an issue)");
+		}
+	} else {
+		logr("Warning: No host given to handle_initial_auth. Maybe fix this probably.\n");
+	}
+
+	struct user user = {
+		.user_name = "Anonymous",
+		.socket = socket,
+		.is_authenticated = true,
+		.remaining_tiles = 60,
+		.max_tiles = 250,
+		.tile_regen_seconds = 10,
+		.total_tiles_placed = 0,
+		.tiles_to_next_level = 100,
+		.current_level_progress = 0,
+		.level = 1,
+		.last_connected_unix = 0,
+	};
+	generate_uuid(user.uuid);
+	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
+	add_user(uptr);
+	uptr->socket = socket;
+
+	// Set up rate limiting
+	assign_rate_limiter_limit(&uptr->canvas_limiter, &g_canvas.settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
+	assign_rate_limiter_limit(&uptr->tile_limiter, &g_canvas.settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
+	uptr->canvas_limiter.current_allowance = g_canvas.settings.getcanvas_max_rate;
+	uptr->tile_limiter.current_allowance = g_canvas.settings.setpixel_max_rate;
+	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
+	gettimeofday(&uptr->canvas_limiter.last_event_time, NULL);
+
+	g_canvas.connected_user_count++;
+	if (g_canvas.connected_user_count > g_canvas.settings.max_concurrent_users) {
+		logr("Kicking %s. Server full. (Sad!)\n", uptr->uuid);
+		kick_with_message(uptr, "Sorry, the server is full :(", "Try again");
+		return NULL;
+	}
+
+	logr("User %s connected. (%4lu)\n", uptr->uuid, g_canvas.connected_user_count);
+	start_user_timer(uptr, socket->mgr);
+	send_user_count();
+
+	uptr->last_event_unix = (unsigned)time(NULL);
+
+	char *res = malloc(1 +
+					   UUID_STR_LEN +
+					   sizeof(uptr->remaining_tiles) +
+					   sizeof(uptr->level) +
+					   sizeof(uptr->max_tiles) +
+					   sizeof(uptr->tiles_to_next_level) +
+					   sizeof(uptr->current_level_progress));
+
+	struct initial_auth_response resp = {
+		//.response_type = RES_AUTH_SUCCESS,
+		//.remaining_tiles = htonl(uptr->remaining_tiles),
+		.level = htonl(uptr->level),
+		.max_tiles = htonl(uptr->max_tiles),
+		.tiles_to_next_level = htonl(uptr->tiles_to_next_level),
+		.current_level_progress = htonl(uptr->current_level_progress),
+	};
+	memcpy(&resp.uuid, uptr->uuid, UUID_STR_LEN);
+	memcpy(res, &resp, sizeof(resp));
+
+	return res;
+}
+
+char *handle_binary_command(const char *request, size_t len, struct mg_connection *c, size_t *response_len) {
+	if (!request || !len) return NULL;
+	printf("Received binary cmd: %i\n", request[0]);
+	struct request *req = (struct request *)request;
+	enum request_type type = (enum request_type)req->request_type;
+	switch (type) {
+		case REQ_AUTH:          return handle_req_auth(req, c, response_len);
+		case REQ_GET_CANVAS:    return handle_req_get_canvas(req, c, response_len);
+		case REQ_GET_TILE_INFO: return handle_req_get_tile_info(req, c, response_len);
+		case REQ_POST_TILE:     return handle_req_post_tile(req, c, response_len);
+		case REQ_GET_COLORS:    return handle_req_get_colors(req, c, response_len);
+		case REQ_SET_USERNAME:  return handle_req_set_username(req, c, response_len);
+		case REQ_INITIAL_AUTH: {
+			struct remote_host *host = extract_host(c);
+			return handle_req_initial_auth(req, c, response_len, host);
+		}
+	}
+	return NULL;
+}
+
 cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connection) {
 	// cmd is not necessarily null-terminated. Trust len.
 	cJSON *command = cJSON_ParseWithLength(cmd, len);
@@ -1340,13 +1623,23 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 		}
 	} else if (event_type == MG_EV_WS_MSG) {
 		struct mg_ws_message *wm = (struct mg_ws_message *)event_data;
-		cJSON *response = handle_command(wm->data.ptr, wm->data.len, c);
-		char *response_str = cJSON_PrintUnformatted(response);
-		if (response_str) {
-			mg_ws_send(c, response_str, strlen(response_str), WEBSOCKET_OP_TEXT);
-			free(response_str);
+		uint8_t op = wm->flags & 15;
+		if (op == WEBSOCKET_OP_BINARY) {
+			size_t response_len = 0;
+			char *response = handle_binary_command(wm->data.ptr, wm->data.len, c, &response_len);
+			if (response) {
+				mg_ws_send(c, response, response_len, WEBSOCKET_OP_BINARY);
+				free(response);
+			}
+		} else if (op == WEBSOCKET_OP_TEXT) {
+			cJSON *response = handle_command(wm->data.ptr, wm->data.len, c);
+			char *response_str = cJSON_PrintUnformatted(response);
+			if (response_str) {
+				mg_ws_send(c, response_str, strlen(response_str), WEBSOCKET_OP_TEXT);
+				free(response_str);
+			}
+			cJSON_Delete(response);
 		}
-		cJSON_Delete(response);
 	} else if (event_type == MG_EV_CLOSE) {
 		drop_user_with_connection(c);
 	}
