@@ -1296,8 +1296,11 @@ enum response_id {
 	RES_TILE_UPDATE,
 	RES_COLOR_LIST,
 	RES_USERNAME_SET_SUCCESS,
+	RES_TILE_INCREMENT,
+	RES_LEVEL_UP,
 	ERR_INVALID_UUID = 128,
 	ERR_OUT_OF_TILES,
+	ERR_RATE_LIMIT_EXCEEDED,
 };
 
 char *ack(enum response_id e) {
@@ -1328,7 +1331,39 @@ char *handle_req_auth(const struct request *req, struct mg_connection *c, size_t
 }
 
 char *handle_req_get_canvas(const struct request *req, struct mg_connection *c, size_t *response_len) {
-	//TODO
+	struct user *user = find_in_connected_users(req->uuid);
+	if (!user) return error(ERR_INVALID_UUID);
+
+	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
+	if (!within_limit) {
+		logr("%s exceeded canvas rate limit\n", user->uuid);
+		return error(ERR_RATE_LIMIT_EXCEEDED);
+	}
+
+	user->last_event_unix = (unsigned)time(NULL);
+
+	struct timeval tmr;
+	gettimeofday(&tmr, NULL);
+
+	// nab a copy of the data, avoid blocking updates for others.
+	uint8_t *copy;
+	size_t copy_len;
+	float copy_ratio;
+	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
+	pthread_mutex_lock(&g_canvas.canvas_cache_lock);
+	copy_len = g_canvas.canvas_cache_len;
+	copy_ratio = g_canvas.canvas_cache_compression_ratio;
+	copy = malloc(copy_len + 1);
+	memcpy(copy + 1, g_canvas.canvas_cache, copy_len);
+	pthread_mutex_unlock(&g_canvas.canvas_cache_lock);
+	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
+	copy[0] = RES_CANVAS;
+	long ms = get_ms_delta(tmr);
+	char buf[64];
+	human_file_size(copy_len, buf);
+	logr("Sending zlib'd canvas to %s. (%.2f%%, %s, %lums)\n", user->uuid, copy_ratio, buf, ms);
+	mg_ws_send(user->socket, (char *)copy, copy_len + 1, WEBSOCKET_OP_BINARY);
+	free(copy);
 	return NULL;
 }
 
@@ -1340,16 +1375,15 @@ char *handle_req_get_tile_info(const struct request *req, struct mg_connection *
 struct tile_update {
 	uint8_t resp_type;
 	uint8_t color_id;
-	uint16_t x;
-	uint16_t y;
+	//2 bytes of padding :(
+	uint32_t i;
 };
 
 char *bin_tile_update(size_t x, size_t y, uint8_t color_id, size_t *response_len) {
 	struct tile_update u = {
 		.resp_type = RES_TILE_UPDATE,
 		.color_id = color_id,
-		.x = ntohs(x),
-		.y = ntohs(y),
+		.i = htonl((x + y * g_canvas.edge_length)),
 	};
 	char *resp = malloc(sizeof(u));
 	memcpy(resp, &u, sizeof(u));
@@ -1366,7 +1400,6 @@ void dump_req(const struct request *req) {
 }
 
 char *handle_req_post_tile(const struct request *req, struct mg_connection *c, size_t *response_len) {
-	dump_req(req);
 	struct user *user = find_in_connected_users(req->uuid);
 
 	if (!user) return error(ERR_INVALID_UUID);
@@ -1379,8 +1412,6 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 	uint8_t color_id = req->color_id;
 	size_t x = req->x;
 	size_t y = req->y;
-
-	printf("Received binary post: %i, %i, %i\n", x, y, color_id);
 
 	if (x > g_canvas.edge_length - 1) return NULL;
 	if (y > g_canvas.edge_length - 1) return NULL;
@@ -1536,6 +1567,10 @@ char *handle_binary_command(const char *request, size_t len, struct mg_connectio
 	if (!request || !len) return NULL;
 	printf("Received binary cmd: %i\n", request[0]);
 	struct request *req = (struct request *)request;
+	req->x = ntohs(req->x);
+	req->y = ntohs(req->y);
+	req->color_id = ntohs(req->color_id);
+
 	enum request_type type = (enum request_type)req->request_type;
 	switch (type) {
 		case REQ_AUTH:          return handle_req_auth(req, c, response_len);
