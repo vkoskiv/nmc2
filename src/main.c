@@ -1379,18 +1379,6 @@ struct tile_update {
 	uint32_t i;
 };
 
-char *bin_tile_update(size_t x, size_t y, uint8_t color_id, size_t *response_len) {
-	struct tile_update u = {
-		.resp_type = RES_TILE_UPDATE,
-		.color_id = color_id,
-		.i = htonl((x + y * g_canvas.edge_length)),
-	};
-	char *resp = malloc(sizeof(u));
-	memcpy(resp, &u, sizeof(u));
-	if (response_len) *response_len = sizeof(u);
-	return resp;
-}
-
 void dump_req(const struct request *req) {
 	printf("request_type: %i\n", req->request_type);
 	printf("uuid        : %.*s\n", UUID_STR_LEN, req->uuid);
@@ -1427,7 +1415,13 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 
 	if (user->is_shadow_banned) {
 		logr("Rejecting request from shadowbanned user: {\"requestType\":\"postTile\",\"userID\":\"%s\",\"X\":%i,\"Y\":%i,\"colorID\":\"%u\"}\n", user->uuid, x, y, color_id);
-		return bin_tile_update(x, y, color_id, response_len);
+		struct tile_update response = {
+			.resp_type = RES_TILE_UPDATE,
+			.color_id = color_id,
+			.i = htonl(x + y * g_canvas.edge_length),
+		};
+		mg_ws_send(user->socket, &response, sizeof(response), WEBSOCKET_OP_BINARY);
+		return NULL;
 	}
 
 	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
@@ -1448,9 +1442,12 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 
 	g_canvas.dirty = true;
 
-	char *resp = bin_tile_update(x, y, color_id, response_len);
-	bin_broadcast(resp, *response_len);
-	free(resp);
+	struct tile_update response = {
+		.resp_type = RES_TILE_UPDATE,
+		.color_id = color_id,
+		.i = htonl(x + y * g_canvas.edge_length),
+	};
+	bin_broadcast(&response, sizeof(response));
 	return NULL; // The broadcast takes care of this
 }
 
