@@ -188,6 +188,7 @@ static bool g_running = true;
 // common request handling logic
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr);
+void send_user_count(void);
 
 void generate_uuid(char *buf) {
 	if (!buf) return;
@@ -226,13 +227,6 @@ void broadcast(const cJSON *payload) {
 		struct user *user = (struct user *)elem->thing;
 		send_json(payload, user);
 	}
-}
-
-void send_user_count(void) {
-	cJSON *response = base_response("userCount");
-	cJSON_AddNumberToObject(response, "count", list_elems(&g_canvas.connected_users));
-	broadcast(response);
-	cJSON_Delete(response);
 }
 
 struct remote_host *try_load_host(struct mg_addr addr) {
@@ -1129,6 +1123,20 @@ void bin_broadcast(const char *payload, size_t len) {
 		struct user *user = (struct user *)elem->thing;
 		mg_ws_send(user->socket, payload, len, WEBSOCKET_OP_BINARY);
 	}
+}
+
+struct user_count {
+	uint8_t type;
+	// 1 byte padding :(
+	uint16_t count;
+};
+
+void send_user_count(void) {
+	struct user_count resp = {
+		.type = RES_USER_COUNT,
+		.count = htons(g_canvas.connected_user_count),
+	};
+	bin_broadcast((const char *)&resp, sizeof(resp));
 }
 
 struct request {
