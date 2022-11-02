@@ -182,13 +182,15 @@ void sleep_ms(int ms) {
 
 // end timing
 
-static struct canvas g_canvas;
 static bool g_running = true;
+// These two below are triggered from a signal handler and polled in main runloop
+static bool g_reload_config = false;
+static bool g_do_db_backup = false;
 
 // common request handling logic
 
 void start_user_timer(struct user *user, struct mg_mgr *mgr);
-void send_user_count(void);
+void send_user_count(const struct canvas *c);
 
 void generate_uuid(char *buf) {
 	if (!buf) return;
@@ -220,27 +222,27 @@ void send_json(const cJSON *payload, const struct user *user) {
 	free(str);
 }
 
-void broadcast(const cJSON *payload) {
+void broadcast(const struct canvas *c, const cJSON *payload) {
 	//FIXME: Make list_foreach more ergonomic
 	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.connected_users) {
+	list_foreach_ro(elem, c->connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		send_json(payload, user);
 	}
 }
 
-struct remote_host *try_load_host(struct mg_addr addr) {
+struct remote_host *try_load_host(struct canvas *c, struct mg_addr addr) {
 	sqlite3_stmt *query;
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, "SELECT * FROM hosts WHERE ip_address = ?", -1, &query, 0);
+	int ret = sqlite3_prepare_v2(c->backing_db, "SELECT * FROM hosts WHERE ip_address = ?", -1, &query, 0);
 	if (ret != SQLITE_OK) {
-		logr("Failed to prepare host load query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		logr("Failed to prepare host load query: %s\n", sqlite3_errmsg(c->backing_db));
 		return NULL;
 	}
 	char ipbuf[100];
 	mg_ntoa(&addr, ipbuf, sizeof(ipbuf));
 	ret = sqlite3_bind_text(query, 1, ipbuf, strlen(ipbuf), NULL);
 	if (ret != SQLITE_OK) {
-		logr("Failed to bind ip to host load query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		logr("Failed to bind ip to host load query: %s\n", sqlite3_errmsg(c->backing_db));
 		return NULL;
 	}
 	int step = sqlite3_step(query);
@@ -262,14 +264,14 @@ struct remote_host *try_load_host(struct mg_addr addr) {
 	return host;
 }
 
-void add_host(const struct remote_host *host) {
+void add_host(struct canvas *c, const struct remote_host *host) {
 	sqlite3_stmt *query;
 	const char *sql = "INSERT INTO hosts (ip_address, total_accounts) VALUES (?, ?)";
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	int ret = sqlite3_prepare_v2(c->backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
-		printf("Failed to prepare host insert query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to prepare host insert query: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	int idx = 1;
@@ -280,9 +282,9 @@ void add_host(const struct remote_host *host) {
 
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
-		printf("Failed to insert host: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to insert host: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 
@@ -292,14 +294,14 @@ void add_host(const struct remote_host *host) {
 	sqlite3_finalize(query);
 }
 
-void save_host(const struct remote_host *host) {
+void save_host(struct canvas *c, const struct remote_host *host) {
 	const char *sql = "UPDATE hosts SET total_accounts = ? WHERE ip_address = ?";
 	sqlite3_stmt *query;
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	int ret = sqlite3_prepare_v2(c->backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
-		printf("Failed to prepare host save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to prepare host save query: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	int idx = 1;
@@ -310,9 +312,9 @@ void save_host(const struct remote_host *host) {
 
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
-		printf("Failed to update host: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to update host: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	sqlite3_finalize(query);
@@ -322,15 +324,15 @@ bool mg_addr_eq(struct mg_addr a, struct mg_addr b) {
 	return memcmp(&a, &b, sizeof(a)) == 0;
 }
 
-struct remote_host *find_host(struct mg_addr addr) {
+struct remote_host *find_host(struct canvas *c, struct mg_addr addr) {
 	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.connected_hosts) {
+	list_foreach_ro(elem, c->connected_hosts) {
 		struct remote_host *host = (struct remote_host *)elem->thing;
 		if (mg_addr_eq(host->addr, addr)) return host;
 	}
-	struct remote_host *host = try_load_host(addr);
+	struct remote_host *host = try_load_host(c, addr);
 	if (host) {
-		struct remote_host *hptr = list_append(g_canvas.connected_hosts, *host)->thing;
+		struct remote_host *hptr = list_append(c->connected_hosts, *host)->thing;
 		free(host);
 		return hptr;
 	}
@@ -338,17 +340,17 @@ struct remote_host *find_host(struct mg_addr addr) {
 	struct remote_host new = {
 		.addr = addr,
 	};
-	host = list_append(g_canvas.connected_hosts, new)->thing;
-	add_host(host);
+	host = list_append(c->connected_hosts, new)->thing;
+	add_host(c, host);
 
 	return host;
 }
 
-struct remote_host *extract_host(struct mg_connection *c) {
-	if (strlen(c->label)) { //TODO: Needed?
+struct remote_host *extract_host(struct canvas *c, struct mg_connection *socket) {
+	if (strlen(socket->label)) { //TODO: Needed?
 		struct mg_addr remote_addr;
-		if (mg_aton(mg_str(c->label), &remote_addr)) {
-			return find_host(remote_addr);
+		if (mg_aton(mg_str(socket->label), &remote_addr)) {
+			return find_host(c, remote_addr);
 		} else {
 			logr("Failed to convert peer address\n");
 		}
@@ -358,9 +360,9 @@ struct remote_host *extract_host(struct mg_connection *c) {
 	return NULL;
 }
 
-struct user *find_in_connected_users(const char *uuid) {
+struct user *find_in_connected_users(const struct canvas *c, const char *uuid) {
 	struct list_elem *head = NULL;
-	list_foreach_ro(head, g_canvas.connected_users) {
+	list_foreach_ro(head, c->connected_users) {
 		struct user *user = (struct user *)head->thing;
 		if (strncmp(user->uuid, uuid, UUID_STR_LEN) == 0) return user;
 	}
@@ -376,14 +378,14 @@ void assign_rate_limiter_limit(struct rate_limiter *limiter, float *max_rate, fl
 	limiter->per_seconds = per_seconds;
 }
 
-void save_user(const struct user *user) {
+void save_user(struct canvas *c, const struct user *user) {
 	const char *sql = "UPDATE users SET username = ?, remainingTiles = ?, tileRegenSeconds = ?, totalTilesPlaced = ?, lastConnected = ?, level = ?, hasSetUsername = ?, isShadowBanned = ?, maxTiles = ?, tilesToNextLevel = ?, levelProgress = ?, cl_last_event_sec = ?, cl_last_event_usec = ?, cl_current_allowance = ?, cl_max_rate = ?, cl_per_seconds = ?, tl_last_event_sec = ?, tl_last_event_usec = ?, tl_current_allowance = ?, tl_max_rate = ?, tl_per_seconds = ? WHERE uuid = ?";
 	sqlite3_stmt *query;
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	int ret = sqlite3_prepare_v2(c->backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
-		printf("Failed to prepare user save query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to prepare user save query: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	int idx = 1;
@@ -412,17 +414,17 @@ void save_user(const struct user *user) {
 
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
-		printf("Failed to update user: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to update user: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	sqlite3_finalize(query);
 }
 
-struct user *try_load_user(const char *uuid) {
+struct user *try_load_user(struct canvas *c, const char *uuid) {
 	sqlite3_stmt *query;
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, "SELECT * FROM users WHERE uuid = ?", -1, &query, 0);
+	int ret = sqlite3_prepare_v2(c->backing_db, "SELECT * FROM users WHERE uuid = ?", -1, &query, 0);
 	if (ret != SQLITE_OK) return NULL;
 	ret = sqlite3_bind_text(query, 1, uuid, strlen(uuid), NULL);
 	if (ret != SQLITE_OK) return NULL;
@@ -460,16 +462,16 @@ struct user *try_load_user(const char *uuid) {
 	return user;
 }
 
-void add_user(const struct user *user) {
+void add_user(struct canvas *c, const struct user *user) {
 	sqlite3_stmt *query;
 	const char *sql =
 		"INSERT INTO users (username, uuid, remainingTiles, tileRegenSeconds, totalTilesPlaced, lastConnected, availableColors, level, hasSetUsername, isShadowBanned, maxTiles, tilesToNextLevel, levelProgress, cl_last_event_sec, cl_last_event_usec, cl_current_allowance, cl_max_rate, cl_per_seconds, tl_last_event_sec, tl_last_event_usec, tl_current_allowance, tl_max_rate, tl_per_seconds)"
 		" VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-	int ret = sqlite3_prepare_v2(g_canvas.backing_db, sql, -1, &query, 0);
+	int ret = sqlite3_prepare_v2(c->backing_db, sql, -1, &query, 0);
 	if (ret != SQLITE_OK) {
-		printf("Failed to prepare user insert query: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to prepare user insert query: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	int idx = 1;
@@ -499,30 +501,30 @@ void add_user(const struct user *user) {
 
 	ret = sqlite3_step(query);
 	if (ret != SQLITE_DONE) {
-		printf("Failed to insert user: %s\n", sqlite3_errmsg(g_canvas.backing_db));
+		printf("Failed to insert user: %s\n", sqlite3_errmsg(c->backing_db));
 		sqlite3_finalize(query);
-		sqlite3_close(g_canvas.backing_db);
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	sqlite3_finalize(query);
 }
 
-void drop_user_with_connection(struct mg_connection *c) {
-	list_foreach(g_canvas.connected_users, {
+void drop_user_with_connection(struct canvas *c, struct mg_connection *connection) {
+	list_foreach(c->connected_users, {
 		struct user *user = (struct user *)arg;
-		if (user->socket != c) return;
-		g_canvas.connected_user_count--;
-		logr("User %s disconnected. (%4lu)\n", user->uuid, g_canvas.connected_user_count);
+		if (user->socket != connection) return;
+		c->connected_user_count--;
+		logr("User %s disconnected. (%4lu)\n", user->uuid, c->connected_user_count);
 		user->last_connected_unix = (unsigned)time(NULL);
-		save_user(user);
-		mg_timer_free(&g_canvas.mgr.timers, user->tile_increment_timer);
+		save_user(c, user);
+		mg_timer_free(&c->mgr.timers, user->tile_increment_timer);
 		user->socket->is_draining = 1;
-		list_remove(g_canvas.connected_users, {
+		list_remove(c->connected_users, {
 			const struct user *list_user = (struct user *)arg;
 			return list_user->socket == user->socket;
 		});
 	});
-	send_user_count();
+	send_user_count(c);
 }
 
 // end common request handling logic
@@ -545,9 +547,9 @@ cJSON *color_to_json(struct color color) {
 	return c;
 }
 
-struct administrator *find_in_admins(const char *uuid) {
+struct administrator *find_in_admins(struct canvas *c, const char *uuid) {
 	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.administrators) {
+	list_foreach_ro(elem, c->administrators) {
 		struct administrator *admin = (struct administrator *)elem->thing;
 		if (str_eq(admin->uuid, uuid)) return admin;
 	}
@@ -575,12 +577,12 @@ void level_up(struct user *user) {
 	cJSON_Delete(response);
 }
 
-cJSON *handle_get_tile_info(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param) {
+cJSON *handle_get_tile_info(struct canvas *c, const cJSON *user_id, const cJSON *x_param, const cJSON *y_param) {
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
 	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
 
-	struct user *user = find_in_connected_users(user_id->valuestring);
+	struct user *user = find_in_connected_users(c, user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 
 	if (!is_within_rate_limit(&user->tile_limiter)) {
@@ -590,12 +592,12 @@ cJSON *handle_get_tile_info(const cJSON *user_id, const cJSON *x_param, const cJ
 	size_t x = x_param->valueint;
 	size_t y = y_param->valueint;
 
-	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
-	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
+	if (x > c->edge_length - 1) return error_response("Invalid X coordinate");
+	if (y > c->edge_length - 1) return error_response("Invalid Y coordinate");
 
-	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
-	struct user *queried_user = find_in_connected_users(tile->last_modifier);
-	if (!queried_user) user = try_load_user(tile->last_modifier);
+	struct tile *tile = &c->tiles[x + y * c->edge_length];
+	struct user *queried_user = find_in_connected_users(c, tile->last_modifier);
+	if (!queried_user) user = try_load_user(c, tile->last_modifier);
 	if (!queried_user) return error_response("Couldn't find a user who modified that tile.");
 
 	cJSON *response = base_response("ti");
@@ -605,26 +607,26 @@ cJSON *handle_get_tile_info(const cJSON *user_id, const cJSON *x_param, const cJ
 	return response;
 }
 
-cJSON *new_tile_update(size_t x, size_t y, uint8_t color_id) {
-	size_t idx = x + y * g_canvas.edge_length;
+cJSON *new_tile_update(size_t edge_length, size_t x, size_t y, uint8_t color_id) {
+	size_t idx = x + y * edge_length;
 	cJSON *response = base_response("tu");
 	cJSON_AddNumberToObject(response, "i", idx);
 	cJSON_AddNumberToObject(response, "c", color_id);
 	return response;
 }
 
-cJSON *handle_get_colors(const cJSON *user_id) {
+cJSON *handle_get_colors(struct canvas *c, const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
-	struct user *user = find_in_connected_users(user_id->valuestring);
+	struct user *user = find_in_connected_users(c, user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 	user->last_event_unix = (unsigned)time(NULL);
-	return cJSON_Parse(g_canvas.color_response_cache);
+	return cJSON_Parse(c->color_response_cache);
 }
 
-cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
+cJSON *handle_set_nickname(struct canvas *c, const cJSON *user_id, const cJSON *name) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	if (!cJSON_IsString(name)) return error_response("No nickname provided");
-	struct user *user = find_in_connected_users(user_id->valuestring);
+	struct user *user = find_in_connected_users(c, user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
 	logr("User %s set their username to %s\n", user_id->valuestring, name->valuestring);
@@ -633,36 +635,36 @@ cJSON *handle_set_nickname(const cJSON *user_id, const cJSON *name) {
 	return base_response("nameSetSuccess");
 }
 
-cJSON *broadcast_announcement(const char *message) {
+cJSON *broadcast_announcement(struct canvas *c, const char *message) {
 	cJSON *response = base_response("announcement");
 	cJSON_AddStringToObject(response, "message", message);
-	broadcast(response);
+	broadcast(c, response);
 	cJSON_Delete(response);
 	return base_response("Success");
 }
 
-void kick_with_message(const struct user *user, const char *message, const char *reconnect_btn_text) {
+void kick_with_message(struct canvas *c, const struct user *user, const char *message, const char *reconnect_btn_text) {
 	cJSON *response = base_response("kicked");
 	cJSON_AddStringToObject(response, "message", message ? message : "Kicked");
 	cJSON_AddStringToObject(response, "btn_text", reconnect_btn_text ? reconnect_btn_text : "Reconnect");
 	send_json(response, user);
 	cJSON_Delete(response);
-	drop_user_with_connection(user->socket);
+	drop_user_with_connection(c, user->socket);
 }
 
-void drop_all_connections(void) {
-	list_foreach(g_canvas.connected_users, {
+void drop_all_connections(struct canvas *c) {
+	list_foreach(c->connected_users, {
 		struct user *user = (struct user *)arg;
 		user->last_connected_unix = (unsigned)time(NULL);
-		g_canvas.connected_user_count--;
-		save_user(user);
-		mg_timer_free(&g_canvas.mgr.timers, user->tile_increment_timer);
+		c->connected_user_count--;
+		save_user(c, user);
+		mg_timer_free(&c->mgr.timers, user->tile_increment_timer);
 		user->socket->is_draining = 1;
-		list_remove(g_canvas.connected_users, {
+		list_remove(c->connected_users, {
 			const struct user *list_user = (struct user *)arg;
 			return list_user->socket == user->socket;
 		});
-		send_user_count();
+		send_user_count(c);
 	});
 }
 
@@ -671,27 +673,27 @@ cJSON *shut_down_server(void) {
 	return NULL;
 }
 
-cJSON *toggle_shadow_ban(const char *uuid) {
-	struct user *user = find_in_connected_users(uuid);
-	if (!user) user = try_load_user(uuid);
+cJSON *toggle_shadow_ban(struct canvas *c, const char *uuid) {
+	struct user *user = find_in_connected_users(c, uuid);
+	if (!user) user = try_load_user(c, uuid);
 	if (!user) return error_response("No user found with that uuid");
 	logr("Toggling is_shadow_banned to %s for user %s\n", !user->is_shadow_banned ? "true " : "false", uuid);
 	user->is_shadow_banned = !user->is_shadow_banned;
-	save_user(user);
+	save_user(c, user);
 	return base_response("Success");
 }
 
-cJSON *shadow_ban_user(const char *uuid) {
-	struct user *user = find_in_connected_users(uuid);
-	if (!user) user = try_load_user(uuid);
+cJSON *shadow_ban_user(struct canvas *c, const char *uuid) {
+	struct user *user = find_in_connected_users(c, uuid);
+	if (!user) user = try_load_user(c, uuid);
 	if (!user) return error_response("No user found with that uuid");
 	logr("Setting is_shadow_banned to true for user %s\n", uuid);
 	user->is_shadow_banned = true;
-	save_user(user);
+	save_user(c, user);
 	return base_response("Success");
 }
 
-cJSON *handle_ban_click(const cJSON *coordinates) {
+cJSON *handle_ban_click(struct canvas *c, const cJSON *coordinates) {
 	if (!cJSON_IsArray(coordinates)) return error_response("No valid coordinates provided");
 	if (cJSON_GetArraySize(coordinates) < 2) return error_response("No valid coordinates provided");
 	cJSON *x_param = cJSON_GetArrayItem(coordinates, 0);
@@ -702,31 +704,31 @@ cJSON *handle_ban_click(const cJSON *coordinates) {
 	size_t x = x_param->valueint;
 	size_t y = y_param->valueint;
 
-	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
-	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
+	if (x > c->edge_length - 1) return error_response("Invalid X coordinate");
+	if (y > c->edge_length - 1) return error_response("Invalid Y coordinate");
 
-	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
-	struct user *user = find_in_connected_users(tile->last_modifier);
-	if (!user) user = try_load_user(tile->last_modifier);
+	struct tile *tile = &c->tiles[x + y * c->edge_length];
+	struct user *user = find_in_connected_users(c, tile->last_modifier);
+	if (!user) user = try_load_user(c, tile->last_modifier);
 	if (!user) return error_response("Couldn't find a user who modified that tile.");
 	if (user->is_shadow_banned) return error_response("Already shadowbanned from there");
 	// Just in case...
-	struct administrator *admin = find_in_admins(user->uuid);
+	struct administrator *admin = find_in_admins(c, user->uuid);
 	if (admin) return error_response("Refusing to shadowban an administrator");
 	logr("User %s shadowbanned from (%4lu,%4lu)\n", user->uuid, x, y);
 	user->is_shadow_banned = true;
-	save_user(user);
+	save_user(c, user);
 
 	return base_response("ban_click_success");
 }
 
-static void admin_place_tile(int x, int y, uint8_t color_id, const char *uuid) {
-	if ((size_t)x > g_canvas.edge_length - 1) return;
-	if ((size_t)y > g_canvas.edge_length - 1) return;
+static void admin_place_tile(struct canvas *c, int x, int y, uint8_t color_id, const char *uuid) {
+	if ((size_t)x > c->edge_length - 1) return;
+	if ((size_t)y > c->edge_length - 1) return;
 	if (x < 0) return;
 	if (y < 0) return;
 
-	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
+	struct tile *tile = &c->tiles[x + y * c->edge_length];
 	if (tile->color_id == color_id) return;
 	tile->color_id = color_id;
 	tile->place_time_unix = (unsigned)time(NULL);
@@ -741,16 +743,16 @@ static void admin_place_tile(int x, int y, uint8_t color_id, const char *uuid) {
 		.y = y,
 		.tile = *tile
 	};
-	list_append(g_canvas.delta, placement);
+	list_append(c->delta, placement);
 
-	g_canvas.dirty = true;
+	c->dirty = true;
 
-	cJSON *update = new_tile_update(x, y, color_id);
-	broadcast(update);
+	cJSON *update = new_tile_update(c->edge_length, x, y, color_id);
+	broadcast(c, update);
 	cJSON_Delete(update);
 }
 
-cJSON *handle_admin_brush(const cJSON *coordinates, const cJSON *colorID, const char *uuid) {
+cJSON *handle_admin_brush(struct canvas *c, const cJSON *coordinates, const cJSON *colorID, const char *uuid) {
 	if (!cJSON_IsArray(coordinates)) return error_response("No valid coordinates provided");
 	if (!cJSON_IsNumber(colorID)) return error_response("colorID not a number");
 	if (cJSON_GetArraySize(coordinates) < 2) return error_response("No valid coordinates provided");
@@ -763,11 +765,11 @@ cJSON *handle_admin_brush(const cJSON *coordinates, const cJSON *colorID, const 
 	size_t x = x_param->valueint;
 	size_t y = y_param->valueint;
 
-	if (color_id > g_canvas.color_list.amount - 1) return error_response("Invalid colorID");
+	if (color_id > c->color_list.amount - 1) return error_response("Invalid colorID");
 
 	for (int diffX = -3; diffX < 4; ++diffX) {
 		for (int diffY = -3; diffY < 4; ++diffY) {
-			admin_place_tile(x + diffX, y + diffY, color_id, uuid);
+			admin_place_tile(c, x + diffX, y + diffY, color_id, uuid);
 		}
 	}
 
@@ -775,9 +777,9 @@ cJSON *handle_admin_brush(const cJSON *coordinates, const cJSON *colorID, const 
 	return payload;
 }
 
-cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
+cJSON *handle_admin_command(struct canvas *c, const cJSON *user_id, const cJSON *command) {
 	if (!cJSON_IsString(user_id)) return error_response("No valid userID provided");
-	struct administrator *admin = find_in_admins(user_id->valuestring);
+	struct administrator *admin = find_in_admins(c, user_id->valuestring);
 	if (!admin) {
 		logr("Rejecting admin command for unknown user %s. Naughty naughty!\n", user_id->valuestring);
 		return error_response("Invalid admin userID");	
@@ -797,63 +799,63 @@ cJSON *handle_admin_command(const cJSON *user_id, const cJSON *command) {
 	}
 	if (str_eq(action->valuestring, "message")) {
 		if (admin->can_announce) {
-			return broadcast_announcement(message->valuestring);
+			return broadcast_announcement(c, message->valuestring);
 		} else {
 			return error_response("You don't have announce permission");
 		}
 	}
 	if (str_eq(action->valuestring, "toggle_shadowban")) {
 		if (admin->can_shadowban) {
-			return toggle_shadow_ban(message->valuestring);
+			return toggle_shadow_ban(c, message->valuestring);
 		} else {
 			return error_response("You don't have shadowban permission");
 		}
 	}
 	if (str_eq(action->valuestring, "banclick")) {
 		if (admin->can_banclick) {
-			return handle_ban_click(coordinates);
+			return handle_ban_click(c, coordinates);
 		} else {
 			return error_response("You don't have banclick permission");
 		}
 	}
 	if (str_eq(action->valuestring, "brush")) {
-		return handle_admin_brush(coordinates, colorID, admin->uuid);
+		return handle_admin_brush(c, coordinates, colorID, admin->uuid);
 	}
 	return error_response("Unknown admin action invoked");
 }
 
-cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
+cJSON *handle_auth(struct canvas *c, const cJSON *user_id, struct mg_connection *socket) {
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (strlen(user_id->valuestring) > UUID_STR_LEN) return error_response("Invalid userID");
 
 	// Kick old user if the user opens in more than one browser tab at once.
-	struct user *user = find_in_connected_users(user_id->valuestring);
+	struct user *user = find_in_connected_users(c, user_id->valuestring);
 	if (user) {
 		logr("Kicking %s, they opened a new session\n", user->uuid);
-		kick_with_message(user, "It looks like you opened another tab?", "Reconnect here");
+		kick_with_message(c, user, "It looks like you opened another tab?", "Reconnect here");
 	}
 
-	user = try_load_user(user_id->valuestring);
+	user = try_load_user(c, user_id->valuestring);
 	if (!user) return error_response("Invalid userID");
-	struct user *uptr = list_append(g_canvas.connected_users, *user)->thing;
+	struct user *uptr = list_append(c->connected_users, *user)->thing;
 	free(user);
 	uptr->socket = socket;
 
-	g_canvas.connected_user_count++;
-	if (g_canvas.connected_user_count > g_canvas.settings.max_concurrent_users) {
+	c->connected_user_count++;
+	if (c->connected_user_count > c->settings.max_concurrent_users) {
 		logr("Kicking %s. Server full. (Sad!)\n", uptr->uuid);
-		kick_with_message(uptr, "Sorry, the server is full :(\n Try again later!", "Try again");
+		kick_with_message(c, uptr, "Sorry, the server is full :(\n Try again later!", "Try again");
 		return NULL;
 	}
 
-	assign_rate_limiter_limit(&uptr->canvas_limiter, &g_canvas.settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
-	assign_rate_limiter_limit(&uptr->tile_limiter, &g_canvas.settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
+	assign_rate_limiter_limit(&uptr->canvas_limiter, &c->settings.getcanvas_max_rate, &c->settings.getcanvas_per_seconds);
+	assign_rate_limiter_limit(&uptr->tile_limiter, &c->settings.setpixel_max_rate, &c->settings.setpixel_per_seconds);
 	// Kinda pointless flag. If this thing is in connected_users list, it's valid.
 	uptr->is_authenticated = true;
 
-	logr("User %s connected. (%4lu)\n", uptr->uuid, g_canvas.connected_user_count);
+	logr("User %s connected. (%4lu)\n", uptr->uuid, c->connected_user_count);
 	start_user_timer(uptr, socket->mgr);
-	send_user_count();
+	send_user_count(c);
 
 	uint64_t cur_time = (unsigned)time(NULL);
 	size_t sec_since_last_connected = cur_time - uptr->last_connected_unix;
@@ -868,7 +870,7 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	cJSON_AddNumberToObject(response, "maxTiles", uptr->max_tiles);
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
-	struct administrator *admin = find_in_admins(uptr->uuid);
+	struct administrator *admin = find_in_admins(c, uptr->uuid);
 	if (admin) {
 		cJSON_AddBoolToObject(response, "showBanBtn", admin->can_banclick);
 		cJSON_AddBoolToObject(response, "showCleanupBtn", admin->can_cleanup);
@@ -876,15 +878,15 @@ cJSON *handle_auth(const cJSON *user_id, struct mg_connection *socket) {
 	return response;
 }
 
-cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *host) {
+cJSON *handle_initial_auth(struct canvas *c, struct mg_connection *socket, struct remote_host *host) {
 	if (host) {
 		logr("Received initialAuth from %s\n", socket->label);
 		host->total_accounts++;
-		save_host(host);
-		if (host->total_accounts > g_canvas.settings.max_users_per_ip) {
+		save_host(c, host);
+		if (host->total_accounts > c->settings.max_users_per_ip) {
 			char ip_buf[50];
 			mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
-			logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, g_canvas.settings.max_users_per_ip);
+			logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, c->settings.max_users_per_ip);
 			return error_response("Maximum users reached for this IP (contact vkoskiv if you think this is an issue)");
 		}
 	} else {
@@ -905,28 +907,28 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 		.last_connected_unix = 0,
 	};
 	generate_uuid(user.uuid);
-	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
-	add_user(uptr);
+	struct user *uptr = list_append(c->connected_users, user)->thing;
+	add_user(c, uptr);
 	uptr->socket = socket;
 
 	// Set up rate limiting
-	assign_rate_limiter_limit(&uptr->canvas_limiter, &g_canvas.settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
-	assign_rate_limiter_limit(&uptr->tile_limiter, &g_canvas.settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
-	uptr->canvas_limiter.current_allowance = g_canvas.settings.getcanvas_max_rate;
-	uptr->tile_limiter.current_allowance = g_canvas.settings.setpixel_max_rate;
+	assign_rate_limiter_limit(&uptr->canvas_limiter, &c->settings.getcanvas_max_rate, &c->settings.getcanvas_per_seconds);
+	assign_rate_limiter_limit(&uptr->tile_limiter, &c->settings.setpixel_max_rate, &c->settings.setpixel_per_seconds);
+	uptr->canvas_limiter.current_allowance = c->settings.getcanvas_max_rate;
+	uptr->tile_limiter.current_allowance = c->settings.setpixel_max_rate;
 	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
 	gettimeofday(&uptr->canvas_limiter.last_event_time, NULL);
 
-	g_canvas.connected_user_count++;
-	if (g_canvas.connected_user_count > g_canvas.settings.max_concurrent_users) {
+	c->connected_user_count++;
+	if (c->connected_user_count > c->settings.max_concurrent_users) {
 		logr("Kicking %s. Server full. (Sad!)\n", uptr->uuid);
-		kick_with_message(uptr, "Sorry, the server is full :(", "Try again");
+		kick_with_message(c, uptr, "Sorry, the server is full :(", "Try again");
 		return NULL;
 	}
 
-	logr("User %s connected. (%4lu)\n", uptr->uuid, g_canvas.connected_user_count);
+	logr("User %s connected. (%4lu)\n", uptr->uuid, c->connected_user_count);
 	start_user_timer(uptr, socket->mgr);
-	send_user_count();
+	send_user_count(c);
 
 	uptr->last_event_unix = (unsigned)time(NULL);
 
@@ -940,7 +942,7 @@ cJSON *handle_initial_auth(struct mg_connection *socket, struct remote_host *hos
 	return response;
 }
 
-cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connection) {
+cJSON *handle_command(struct canvas *c, const char *cmd, size_t len, struct mg_connection *connection) {
 	// cmd is not necessarily null-terminated. Trust len.
 	cJSON *command = cJSON_ParseWithLength(cmd, len);
 	if (!command) return error_response("No command provided");
@@ -956,18 +958,18 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 
 	cJSON *response = NULL;
 	if (str_eq(reqstr, "initialAuth")) {
-		struct remote_host *host = extract_host(connection);
-		response = handle_initial_auth(connection, host);
+		struct remote_host *host = extract_host(c, connection);
+		response = handle_initial_auth(c, connection, host);
 	} else if (str_eq(reqstr, "auth")) {
-		response = handle_auth(user_id, connection);
+		response = handle_auth(c, user_id, connection);
 	} else if (str_eq(reqstr, "gti")) {
-		response = handle_get_tile_info(user_id, x, y);
+		response = handle_get_tile_info(c, user_id, x, y);
 	} else if (str_eq(reqstr, "getColors")) {
-		response = handle_get_colors(user_id);
+		response = handle_get_colors(c, user_id);
 	} else if (str_eq(reqstr, "setUsername")) {
-		response = handle_set_nickname(user_id, name);
+		response = handle_set_nickname(c, user_id, name);
 	} else if (str_eq(reqstr, "admin_cmd")) {
-		response = handle_admin_command(user_id, admin_cmd);
+		response = handle_admin_command(c, user_id, admin_cmd);
 	} else {
 		response = error_response("Unknown requestType");
 	}
@@ -1015,9 +1017,9 @@ char *error(enum response_id e) {
 	return ack(e);
 }
 
-void bin_broadcast(const char *payload, size_t len) {
+void bin_broadcast(const struct canvas *c, const char *payload, size_t len) {
 	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.connected_users) {
+	list_foreach_ro(elem, c->connected_users) {
 		struct user *user = (struct user *)elem->thing;
 		mg_ws_send(user->socket, payload, len, WEBSOCKET_OP_BINARY);
 	}
@@ -1029,12 +1031,12 @@ struct user_count {
 	uint16_t count;
 };
 
-void send_user_count(void) {
+void send_user_count(const struct canvas *c) {
 	struct user_count resp = {
 		.type = RES_USER_COUNT,
-		.count = htons(g_canvas.connected_user_count),
+		.count = htons(c->connected_user_count),
 	};
-	bin_broadcast((const char *)&resp, sizeof(resp));
+	bin_broadcast(c, (const char *)&resp, sizeof(resp));
 }
 
 struct request {
@@ -1049,19 +1051,21 @@ struct request {
 	char data[];
 };
 
-char *handle_req_auth(const struct request *req, struct mg_connection *c, size_t *response_len) {
+char *handle_req_auth(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
 	(void)req;
 	(void)c;
 	(void)response_len;
+	(void)connection;
 	//TODO
 	logr("TODO: req_auth\n");
 	return NULL;
 }
 
-char *handle_req_get_canvas(const struct request *req, struct mg_connection *c, size_t *response_len) {
+char *handle_req_get_canvas(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
 	(void)c;
 	(void)response_len;
-	struct user *user = find_in_connected_users(req->uuid);
+	(void)connection;
+	struct user *user = find_in_connected_users(c, req->uuid);
 	if (!user) return error(ERR_INVALID_UUID);
 
 	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
@@ -1080,12 +1084,12 @@ char *handle_req_get_canvas(const struct request *req, struct mg_connection *c, 
 	size_t copy_len;
 	float copy_ratio;
 	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
-	pthread_mutex_lock(&g_canvas.canvas_cache_lock);
-	copy_len = g_canvas.canvas_cache_len;
-	copy_ratio = g_canvas.canvas_cache_compression_ratio;
+	pthread_mutex_lock(&c->canvas_cache_lock);
+	copy_len = c->canvas_cache_len;
+	copy_ratio = c->canvas_cache_compression_ratio;
 	copy = malloc(copy_len + 1);
-	memcpy(copy + 1, g_canvas.canvas_cache, copy_len);
-	pthread_mutex_unlock(&g_canvas.canvas_cache_lock);
+	memcpy(copy + 1, c->canvas_cache, copy_len);
+	pthread_mutex_unlock(&c->canvas_cache_lock);
 	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
 	copy[0] = RES_CANVAS;
 	long ms = get_ms_delta(tmr);
@@ -1097,11 +1101,12 @@ char *handle_req_get_canvas(const struct request *req, struct mg_connection *c, 
 	return NULL;
 }
 
-char *handle_req_get_tile_info(const struct request *req, struct mg_connection *c, size_t *response_len) {
+char *handle_req_get_tile_info(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
 	//TODO
 	(void)req;
 	(void)c;
 	(void)response_len;
+	(void)connection;
 	logr("TODO: req_get_tile_info\n");
 	return NULL;
 }
@@ -1121,10 +1126,11 @@ void dump_req(const struct request *req) {
 	printf("cld/len     : %i\n", req->color_id);
 }
 
-char *handle_req_post_tile(const struct request *req, struct mg_connection *c, size_t *response_len) {
+char *handle_req_post_tile(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
 	(void)c;
 	(void)response_len;
-	struct user *user = find_in_connected_users(req->uuid);
+	(void)connection;
+	struct user *user = find_in_connected_users(c, req->uuid);
 
 	if (!user) return error(ERR_INVALID_UUID);
 	if (user->remaining_tiles < 1) return NULL;
@@ -1137,9 +1143,9 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 	size_t x = req->x;
 	size_t y = req->y;
 
-	if (x > g_canvas.edge_length - 1) return NULL;
-	if (y > g_canvas.edge_length - 1) return NULL;
-	if (color_id > g_canvas.color_list.amount - 1) return NULL;
+	if (x > c->edge_length - 1) return NULL;
+	if (y > c->edge_length - 1) return NULL;
+	if (color_id > c->color_list.amount - 1) return NULL;
 
 	user->remaining_tiles--;
 	user->total_tiles_placed++;
@@ -1154,7 +1160,7 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 		struct tile_update response = {
 			.resp_type = RES_TILE_UPDATE,
 			.color_id = color_id,
-			.i = htonl(x + y * g_canvas.edge_length),
+			.i = htonl(x + y * c->edge_length),
 		};
 		mg_ws_send(user->socket, (const char *)&response, sizeof(response), WEBSOCKET_OP_BINARY);
 		return NULL;
@@ -1163,7 +1169,7 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
 	logr("Received request: {\"requestType\":\"postTile\",\"userID\":\"%s\",\"X\":%li,\"Y\":%li,\"colorID\":\"%u\"}\n", user->uuid, x, y, color_id);
 
-	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
+	struct tile *tile = &c->tiles[x + y * c->edge_length];
 	tile->color_id = color_id;
 	tile->place_time_unix = user->last_event_unix;
 	memcpy(tile->last_modifier, user->uuid, sizeof(tile->last_modifier));
@@ -1174,40 +1180,42 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 		.y = y,
 		.tile = *tile
 	};
-	list_append(g_canvas.delta, placement);
+	list_append(c->delta, placement);
 
-	g_canvas.dirty = true;
+	c->dirty = true;
 
 	struct tile_update response = {
 		.resp_type = RES_TILE_UPDATE,
 		.color_id = color_id,
-		.i = htonl(x + y * g_canvas.edge_length),
+		.i = htonl(x + y * c->edge_length),
 	};
-	bin_broadcast((const char *)&response, sizeof(response));
+	bin_broadcast(c, (const char *)&response, sizeof(response));
 	return NULL; // The broadcast takes care of this
 }
 
-char *handle_req_get_colors(const struct request *req, struct mg_connection *c, size_t *response_len) {
+char *handle_req_get_colors(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
 	(void)c;
+	(void)connection;
 	(void)response_len;
-	struct user *user = find_in_connected_users(req->uuid);
+	struct user *user = find_in_connected_users(c, req->uuid);
 	if (!user) return error(ERR_INVALID_UUID);
 
 	user->last_event_unix = (unsigned)time(NULL);
 	//TODO: cache as well maybe
 
-	char *response = malloc(1 + g_canvas.color_list.amount * sizeof(struct color));
+	char *response = malloc(1 + c->color_list.amount * sizeof(struct color));
 	response[0] = RES_COLOR_LIST;
 	struct color *list = (struct color *)response + 1;
-	for (size_t i = 0; i < g_canvas.color_list.amount; ++i) {
-		list[i] = g_canvas.color_list.colors[i];
+	for (size_t i = 0; i < c->color_list.amount; ++i) {
+		list[i] = c->color_list.colors[i];
 	}
 	return response;
 }
 
-char *handle_req_set_username(const struct request *req, struct mg_connection *c, size_t *response_len) {
+char *handle_req_set_username(struct canvas *canvas, const struct request *req, struct mg_connection *c, size_t *response_len) {
 	//TODO
 	logr("TODO: req_set_username\n");
+	(void)canvas;
 	(void)req;
 	(void)c;
 	(void)response_len;
@@ -1224,7 +1232,8 @@ struct initial_auth_response {
 	char uuid[UUID_STR_LEN];
 };
 
-char *handle_req_initial_auth(const struct request *req, struct mg_connection *socket, size_t *response_len, struct remote_host *host) {
+char *handle_req_initial_auth(struct canvas *c, const struct request *req, struct mg_connection *socket, size_t *response_len, struct remote_host *host) {
+	(void)c;
 	(void)req;
 	(void)socket;
 	(void)response_len;
@@ -1234,11 +1243,11 @@ char *handle_req_initial_auth(const struct request *req, struct mg_connection *s
 	if (host) {
 		logr("Received initialAuth from %s\n", socket->label);
 		host->total_accounts++;
-		save_host(host);
-		if (host->total_accounts > g_canvas.settings.max_users_per_ip) {
+		save_host(c, host);
+		if (host->total_accounts > c->settings.max_users_per_ip) {
 			char ip_buf[50];
 			mg_ntoa(&host->addr, ip_buf, sizeof(ip_buf));
-			logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, g_canvas.settings.max_users_per_ip);
+			logr("Rejecting initialAuth from %s, reached maximum of %li users\n", ip_buf, c->settings.max_users_per_ip);
 			return error_response("Maximum users reached for this IP (contact vkoskiv if you think this is an issue)");
 		}
 	} else {
@@ -1259,28 +1268,28 @@ char *handle_req_initial_auth(const struct request *req, struct mg_connection *s
 		.last_connected_unix = 0,
 	};
 	generate_uuid(user.uuid);
-	struct user *uptr = list_append(g_canvas.connected_users, user)->thing;
-	add_user(uptr);
+	struct user *uptr = list_append(c->connected_users, user)->thing;
+	add_user(c, uptr);
 	uptr->socket = socket;
 
 	// Set up rate limiting
-	assign_rate_limiter_limit(&uptr->canvas_limiter, &g_canvas.settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
-	assign_rate_limiter_limit(&uptr->tile_limiter, &g_canvas.settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
-	uptr->canvas_limiter.current_allowance = g_canvas.settings.getcanvas_max_rate;
-	uptr->tile_limiter.current_allowance = g_canvas.settings.setpixel_max_rate;
+	assign_rate_limiter_limit(&uptr->canvas_limiter, &c->settings.getcanvas_max_rate, &g_canvas.settings.getcanvas_per_seconds);
+	assign_rate_limiter_limit(&uptr->tile_limiter, &c->settings.setpixel_max_rate, &g_canvas.settings.setpixel_per_seconds);
+	uptr->canvas_limiter.current_allowance = c->settings.getcanvas_max_rate;
+	uptr->tile_limiter.current_allowance = c->settings.setpixel_max_rate;
 	gettimeofday(&uptr->tile_limiter.last_event_time, NULL);
 	gettimeofday(&uptr->canvas_limiter.last_event_time, NULL);
 
-	g_canvas.connected_user_count++;
-	if (g_canvas.connected_user_count > g_canvas.settings.max_concurrent_users) {
+	c->connected_user_count++;
+	if (c->connected_user_count > g_canvas.settings.max_concurrent_users) {
 		logr("Kicking %s. Server full. (Sad!)\n", uptr->uuid);
-		kick_with_message(uptr, "Sorry, the server is full :(", "Try again");
+		kick_with_message(c, uptr, "Sorry, the server is full :(", "Try again");
 		return NULL;
 	}
 
-	logr("User %s connected. (%4lu)\n", uptr->uuid, g_canvas.connected_user_count);
+	logr("User %s connected. (%4lu)\n", uptr->uuid, c->connected_user_count);
 	start_user_timer(uptr, socket->mgr);
-	send_user_count();
+	send_user_count(c);
 
 	uptr->last_event_unix = (unsigned)time(NULL);
 
@@ -1307,7 +1316,7 @@ char *handle_req_initial_auth(const struct request *req, struct mg_connection *s
 	*/
 }
 
-char *handle_binary_command(const char *request, size_t len, struct mg_connection *c, size_t *response_len) {
+char *handle_binary_command(struct canvas *c, const char *request, size_t len, struct mg_connection *connection, size_t *response_len) {
 	if (!request || !len) return NULL;
 	struct request *req = (struct request *)request;
 	req->x = ntohs(req->x);
@@ -1316,15 +1325,15 @@ char *handle_binary_command(const char *request, size_t len, struct mg_connectio
 
 	enum request_type type = (enum request_type)req->request_type;
 	switch (type) {
-		case REQ_AUTH:          return handle_req_auth(req, c, response_len);
-		case REQ_GET_CANVAS:    return handle_req_get_canvas(req, c, response_len);
-		case REQ_GET_TILE_INFO: return handle_req_get_tile_info(req, c, response_len);
-		case REQ_POST_TILE:     return handle_req_post_tile(req, c, response_len);
-		case REQ_GET_COLORS:    return handle_req_get_colors(req, c, response_len);
-		case REQ_SET_USERNAME:  return handle_req_set_username(req, c, response_len);
+		case REQ_AUTH:          return handle_req_auth(c, req, connection, response_len);
+		case REQ_GET_CANVAS:    return handle_req_get_canvas(c, req, connection, response_len);
+		case REQ_GET_TILE_INFO: return handle_req_get_tile_info(c, req, connection, response_len);
+		case REQ_POST_TILE:     return handle_req_post_tile(c, req, connection, response_len);
+		case REQ_GET_COLORS:    return handle_req_get_colors(c, req, connection, response_len);
+		case REQ_SET_USERNAME:  return handle_req_set_username(c, req, connection, response_len);
 		case REQ_INITIAL_AUTH: {
-			struct remote_host *host = extract_host(c);
-			return handle_req_initial_auth(req, c, response_len, host);
+			struct remote_host *host = extract_host(c, connection);
+			return handle_req_initial_auth(c, req, connection, response_len, host);
 		}
 	}
 	return NULL;
@@ -1345,7 +1354,7 @@ void update_color_response_cache(struct canvas *c) {
 	cJSON_Delete(response_object);
 }
 
-void do_db_backup() {
+void do_db_backup(struct canvas *c) {
 	const time_t cur_time = time(NULL);
 	struct tm time = *localtime(&cur_time);
 	char target[128];
@@ -1365,7 +1374,7 @@ void do_db_backup() {
 		return;
 	}
 
-	sqlite3_backup *backup = sqlite3_backup_init(target_db, "main", g_canvas.backing_db, "main");
+	sqlite3_backup *backup = sqlite3_backup_init(target_db, "main", c->backing_db, "main");
 	if (backup) {
 		sqlite3_backup_step(backup, -1);
 		sqlite3_backup_finish(backup);
@@ -1482,7 +1491,7 @@ void load_config(struct canvas *c) {
 	strncpy(c->settings.dbase_file, dbase_file->valuestring, sizeof(c->settings.dbase_file) - 1);
 
 	// Load up administrator list
-	list_destroy(&g_canvas.administrators);
+	list_destroy(&c->administrators);
 	cJSON *admin = NULL;
 	cJSON_ArrayForEach(admin, administrators) {
 		if (!cJSON_IsObject(admin)) continue;
@@ -1505,7 +1514,7 @@ void load_config(struct canvas *c) {
 			.can_cleanup   = cJSON_IsBool(cleanup)   ? cleanup->valueint   : false,
 		};
 		strncpy(a.uuid, uuid->valuestring, sizeof(a.uuid) - 1);
-		list_append(g_canvas.administrators, a);
+		list_append(c->administrators, a);
 	}
 
 	if (c->color_list.colors) free(c->color_list.colors);
@@ -1555,11 +1564,11 @@ void start_user_timer(struct user *user, struct mg_mgr *mgr) {
 }
 
 void update_getcanvas_cache(struct canvas *c) {
-	size_t tilecount = g_canvas.edge_length * g_canvas.edge_length;
+	size_t tilecount = c->edge_length * c->edge_length;
 
 	uint8_t *pixels = malloc(tilecount);
 	for (size_t i = 0; i < tilecount; ++i) {
-		pixels[i] = g_canvas.tiles[i].color_id;
+		pixels[i] = c->tiles[i].color_id;
 	}
 
 	size_t compressed_len = compressBound(tilecount);
@@ -1597,7 +1606,7 @@ void *worker_thread(void *arg) {
 }
 
 static void callback_fn(struct mg_connection *c, int event_type, void *event_data, void *arg) {
-	(void)arg; // TODO: Pass around a canvas instead of having that global up there
+	struct canvas *canvas = (struct canvas *)arg;
 
 	if (event_type == MG_EV_HTTP_MSG) {
 		struct mg_http_message *msg = (struct mg_http_message *)event_data;
@@ -1631,13 +1640,13 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 		uint8_t op = wm->flags & 15;
 		if (op == WEBSOCKET_OP_BINARY) {
 			size_t response_len = 0;
-			char *response = handle_binary_command(wm->data.ptr, wm->data.len, c, &response_len);
+			char *response = handle_binary_command(canvas, wm->data.ptr, wm->data.len, c, &response_len);
 			if (response) {
 				mg_ws_send(c, response, response_len, WEBSOCKET_OP_BINARY);
 				free(response);
 			}
 		} else if (op == WEBSOCKET_OP_TEXT) {
-			cJSON *response = handle_command(wm->data.ptr, wm->data.len, c);
+			cJSON *response = handle_command(canvas, wm->data.ptr, wm->data.len, c);
 			char *response_str = cJSON_PrintUnformatted(response);
 			if (response_str) {
 				mg_ws_send(c, response_str, strlen(response_str), WEBSOCKET_OP_TEXT);
@@ -1646,7 +1655,7 @@ static void callback_fn(struct mg_connection *c, int event_type, void *event_dat
 			cJSON_Delete(response);
 		}
 	} else if (event_type == MG_EV_CLOSE) {
-		drop_user_with_connection(c);
+		drop_user_with_connection(canvas, c);
 	}
 }
 
@@ -1657,8 +1666,7 @@ static void ping_timer_fn(void *arg) {
 	}
 }
 
-void start_transaction() {
-	sqlite3 *db = g_canvas.backing_db;
+void start_transaction(sqlite3 *db) {
 	sqlite3_stmt *bt;
 	sqlite3_prepare_v2(db, "BEGIN TRANSACTION", -1, &bt, NULL);
 	int ret = sqlite3_step(bt);
@@ -1671,8 +1679,7 @@ void start_transaction() {
 	sqlite3_finalize(bt);
 }
 
-void commit_transaction() {
-	sqlite3 *db = g_canvas.backing_db;
+void commit_transaction(sqlite3 *db) {
 	sqlite3_stmt *et;
 	sqlite3_prepare_v2(db, "COMMIT", -1, &et, NULL);
 	int ret = sqlite3_step(et);
@@ -1686,41 +1693,40 @@ void commit_transaction() {
 }
 
 static void users_save_timer_fn(void *arg) {
-	(void)arg;
-	size_t users = list_elems(&g_canvas.connected_users);
+	struct canvas *canvas = (struct canvas *)arg;
+	size_t users = list_elems(&canvas->connected_users);
 	if (!users) return;
-	start_transaction();
+	start_transaction(canvas->backing_db);
 	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.connected_users) {
+	list_foreach_ro(elem, canvas->connected_users) {
 		struct user *user = (struct user *)elem->thing;
-		save_user(user);
+		save_user(canvas, user);
 	}
-	commit_transaction();
+	commit_transaction(canvas->backing_db);
 
 	// Check and kick inactive users
 	uint64_t current_time_unix = (unsigned)time(NULL);
-	list_foreach(g_canvas.connected_users, {
+	list_foreach(canvas->connected_users, {
 		struct user *user = (struct user *)arg;
 		size_t sec_since_last_event = current_time_unix - user->last_event_unix;
-		if (sec_since_last_event > g_canvas.settings.kick_inactive_after_sec) {
+		if (sec_since_last_event > canvas->settings.kick_inactive_after_sec) {
 			logr("Kicking inactive user %s\n", user->uuid);
-			kick_with_message(user, "You haven't drawn anything for a while, so you were disconnected.", "Reconnect");
+			kick_with_message(canvas, user, "You haven't drawn anything for a while, so you were disconnected.", "Reconnect");
 		}
 	});
 }
 
 static void canvas_save_timer_fn(void *arg) {
-	//struct mg_mgr *mgr = (struct mg_mgr *)arg;
-	(void)arg;
+	struct canvas *canvas = (struct canvas *)arg;
 
-	if (!g_canvas.dirty) return;
+	if (!canvas->dirty) return;
 
 	struct timeval timer;
 	gettimeofday(&timer, NULL);
 
-	sqlite3 *db = g_canvas.backing_db;
+	sqlite3 *db = canvas->backing_db;
 	
-	start_transaction();
+	start_transaction(db);
 
 	sqlite3_stmt *insert;
 	int ret = sqlite3_prepare_v2(db, "UPDATE tiles SET colorID = ?, lastModifier = ?, placeTime = ? WHERE X = ? AND Y = ?", -1, &insert, NULL);
@@ -1729,10 +1735,10 @@ static void canvas_save_timer_fn(void *arg) {
 		goto bail;
 	}
 
-	logr("Saving canvas to disk (%li events) ", list_elems(&g_canvas.delta));
+	logr("Saving canvas to disk (%li events) ", list_elems(&canvas->delta));
 
 	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.delta) {
+	list_foreach_ro(elem, canvas->delta) {
 		struct tile_placement *p = (struct tile_placement *)elem->thing;
 		int idx = 1;
 		struct tile *tile = &p->tile;
@@ -1757,19 +1763,20 @@ static void canvas_save_timer_fn(void *arg) {
 		sqlite3_clear_bindings(insert);
 		sqlite3_reset(insert);
 	}
-	list_destroy(&g_canvas.delta);
+	list_destroy(&canvas->delta);
 
 bail:
 	sqlite3_finalize(insert);
 
-	commit_transaction();
+	commit_transaction(db);
 	long ms = get_ms_delta(timer);
 	printf("(%lims)\n", ms);
-	g_canvas.dirty = false;
+	canvas->dirty = false;
 }
 
-void ensure_tiles_table(sqlite3 *db) {
+void ensure_tiles_table(struct canvas *c) {
 	// Next, ensure we've got tiles in there.
+	sqlite3 *db = c->backing_db;
 	sqlite3_stmt *count;
 	int ret = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tiles", -1, &count, NULL);
 	if (ret != SQLITE_OK) {
@@ -1790,15 +1797,15 @@ void ensure_tiles_table(sqlite3 *db) {
 
 	if (rows > 0) return;
 
-	start_transaction();
+	start_transaction(db);
 
 	logr("Running initial tile db init...\n");
 	sqlite3_stmt *insert;
 	ret = sqlite3_prepare_v2(db, "INSERT INTO tiles (X, Y, colorID, lastModifier, placeTime) VALUES (?, ?, 3, \"\", 0)", -1, &insert, NULL);
 	if (ret != SQLITE_OK) printf("Failed to prepare tile insert: %s\n", sqlite3_errmsg(db));
 
-	for (size_t y = 0; y < g_canvas.settings.new_db_canvas_size; ++y) {
-		for (size_t x = 0; x < g_canvas.settings.new_db_canvas_size; ++x) {
+	for (size_t y = 0; y < c->settings.new_db_canvas_size; ++y) {
+		for (size_t x = 0; x < c->settings.new_db_canvas_size; ++x) {
 			ret = sqlite3_bind_int(insert, 1, x);
 			if (ret != SQLITE_OK) printf("Failed to bind x: %s\n", sqlite3_errmsg(db));
 			ret = sqlite3_bind_int(insert, 2, y);
@@ -1816,24 +1823,24 @@ void ensure_tiles_table(sqlite3 *db) {
 	}
 	sqlite3_finalize(insert);
 
-	commit_transaction();
+	commit_transaction(db);
 
 	logr("db init done.\n");
 }
 
-void ensure_valid_db(sqlite3 *db) {
+void ensure_valid_db(struct canvas *c) {
 	char *schema = load_file("schema.sql", NULL);
 	if (!schema) {
 		exit(-1);
 	}
-	int ret = sqlite3_exec(db, schema, NULL, NULL, NULL);
+	int ret = sqlite3_exec(c->backing_db, schema, NULL, NULL, NULL);
 	if (ret == SQLITE_ABORT) {
-		printf("Failed to create database, check schema file. Error: %s\n", sqlite3_errmsg(db));
-		sqlite3_close(db);
+		printf("Failed to create database, check schema file. Error: %s\n", sqlite3_errmsg(c->backing_db));
+		sqlite3_close(c->backing_db);
 		exit(-1);
 	}
 	free(schema);
-	ensure_tiles_table(db); // Generate canvas if needed
+	ensure_tiles_table(c); // Generate canvas if needed
 }
 
 bool load_tiles(struct canvas *c) {
@@ -1856,9 +1863,9 @@ bool load_tiles(struct canvas *c) {
 	c->edge_length = sqrt(rows);
 	sqlite3_finalize(count_query);
 
-	g_canvas.tiles = calloc(g_canvas.edge_length * g_canvas.edge_length, sizeof(struct tile));
-	g_canvas.connected_users = LIST_INITIALIZER;
-	g_canvas.connected_hosts = LIST_INITIALIZER;
+	c->tiles = calloc(c->edge_length * c->edge_length, sizeof(struct tile));
+	c->connected_users = LIST_INITIALIZER;
+	c->connected_hosts = LIST_INITIALIZER;
 	printf("Loading %ux%u canvas...\n", c->edge_length, c->edge_length);
 
 	sqlite3_stmt *query;
@@ -1868,13 +1875,13 @@ bool load_tiles(struct canvas *c) {
 		int idx = 1;
 		size_t x = sqlite3_column_int(query, idx++);
 		size_t y = sqlite3_column_int(query, idx++);
-		g_canvas.tiles[x + y * g_canvas.edge_length].color_id = sqlite3_column_int(query, idx++);
+		c->tiles[x + y * c->edge_length].color_id = sqlite3_column_int(query, idx++);
 		const char *last_modifier = (const char *)sqlite3_column_text(query, idx++);
-		strncpy(g_canvas.tiles[x + y * g_canvas.edge_length].last_modifier, last_modifier, UUID_STR_LEN - 1);
-		g_canvas.tiles[x + y * g_canvas.edge_length].place_time_unix = sqlite3_column_int64(query, idx++);
+		strncpy(c->tiles[x + y * c->edge_length].last_modifier, last_modifier, UUID_STR_LEN - 1);
+		c->tiles[x + y * c->edge_length].place_time_unix = sqlite3_column_int64(query, idx++);
 	}
 	sqlite3_finalize(query);
-	g_canvas.dirty = false;
+	c->dirty = false;
 	return false;
 }
 
@@ -1889,7 +1896,7 @@ bool set_up_db(struct canvas *c) {
 
 	// I might mess with the db while it's in use.
 	sqlite3_busy_timeout(c->backing_db, 2000);
-	ensure_valid_db(c->backing_db);
+	ensure_valid_db(c);
 	load_tiles(c);
 
 	return false;
@@ -1909,10 +1916,10 @@ void sig_handler(int sig) {
 			break;
 		case SIGUSR1:
 			printf("Received SIGUSR1, reloading config...\n");
-			load_config(&g_canvas);
+			g_reload_config = true;
 			break;
 		case SIGUSR2:
-			do_db_backup();
+			g_do_db_backup = true;
 			break;
 	}
 }
@@ -1930,11 +1937,11 @@ void start_worker_thread(struct canvas *c) {
 int main(void) {
 	setbuf(stdout, NULL); // Disable output buffering
 
-	g_canvas = (struct canvas){ 0 };
-	load_config(&g_canvas);
+	struct canvas canvas = (struct canvas){ 0 };
+	load_config(&canvas);
 
 	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, g_canvas.administrators) {
+	list_foreach_ro(elem, canvas.administrators) {
 		struct administrator *admin = (struct administrator *)elem->thing;
 
 		if (str_eq(admin->uuid, "<Desired userID here>")) {
@@ -1961,46 +1968,56 @@ int main(void) {
 		return -1;
 	}
 	printf("Using SQLite v%s\n", sqlite3_libversion());
-	if (set_up_db(&g_canvas)) {
+	if (set_up_db(&canvas)) {
 		printf("Failed to set up db\n");
 		return -1;
 	}
 
-	mg_mgr_init(&g_canvas.mgr);
+	mg_mgr_init(&canvas.mgr);
 	//ws ping loop. TODO: Probably do this from the client side instead.
-	mg_timer_add(&g_canvas.mgr, 1000 * g_canvas.settings.websocket_ping_interval_sec, MG_TIMER_REPEAT, ping_timer_fn, &g_canvas.mgr);
-	mg_timer_add(&g_canvas.mgr, 1000 * g_canvas.settings.canvas_save_interval_sec, MG_TIMER_REPEAT, canvas_save_timer_fn, &g_canvas.mgr);
-	mg_timer_add(&g_canvas.mgr, 1000 * g_canvas.settings.users_save_interval_sec, MG_TIMER_REPEAT, users_save_timer_fn, &g_canvas.mgr);
-	printf("Starting WS listener on %s/ws\n", g_canvas.settings.listen_url);
-	mg_http_listen(&g_canvas.mgr, g_canvas.settings.listen_url, callback_fn, NULL);
+	mg_timer_add(&canvas.mgr, 1000 * canvas.settings.websocket_ping_interval_sec, MG_TIMER_REPEAT, ping_timer_fn, &canvas.mgr);
+	mg_timer_add(&canvas.mgr, 1000 * canvas.settings.canvas_save_interval_sec, MG_TIMER_REPEAT, canvas_save_timer_fn, &canvas);
+	mg_timer_add(&canvas.mgr, 1000 * canvas.settings.users_save_interval_sec, MG_TIMER_REPEAT, users_save_timer_fn, &canvas);
+	printf("Starting WS listener on %s/ws\n", canvas.settings.listen_url);
+	mg_http_listen(&canvas.mgr, canvas.settings.listen_url, callback_fn, &canvas);
 	// Set up canvas cache and start a background worker to refresh it
-	update_getcanvas_cache(&g_canvas);
-	start_worker_thread(&g_canvas);
-	while (g_running) mg_mgr_poll(&g_canvas.mgr, 1000);
+	update_getcanvas_cache(&canvas);
+	start_worker_thread(&canvas);
+	while (g_running) {
+		if (g_reload_config) {
+			load_config(&canvas);
+			g_reload_config = false;
+		}
+		if (g_do_db_backup) {
+			do_db_backup(&canvas);
+			g_do_db_backup = false;
+		}
+		mg_mgr_poll(&canvas.mgr, 1000);
+	}
 
 	cJSON *response = base_response("disconnecting");
-	broadcast(response);
+	broadcast(&canvas, response);
 	cJSON_Delete(response);
-	drop_all_connections();
+	drop_all_connections(&canvas);
 
 	//FIXME: Hack. Just flush some events before closing
 	for (size_t i = 0; i < 100; ++i) {
-		mg_mgr_poll(&g_canvas.mgr, 1);
+		mg_mgr_poll(&canvas.mgr, 1);
 	}
 	logr("Saving canvas one more time...\n");
-	canvas_save_timer_fn(NULL);
+	canvas_save_timer_fn(&canvas);
 	logr("Saving users...\n");
-	users_save_timer_fn(NULL);
+	users_save_timer_fn(&canvas);
 
 	printf("Closing db\n");
-	mg_mgr_free(&g_canvas.mgr);
-	free(g_canvas.tiles);
-	free(g_canvas.color_list.colors);
-	free(g_canvas.color_response_cache);
-	list_destroy(&g_canvas.connected_users);
-	list_destroy(&g_canvas.connected_hosts);
-	list_destroy(&g_canvas.administrators);
-	list_destroy(&g_canvas.delta);
-	sqlite3_close(g_canvas.backing_db);
+	mg_mgr_free(&canvas.mgr);
+	free(canvas.tiles);
+	free(canvas.color_list.colors);
+	free(canvas.color_response_cache);
+	list_destroy(&canvas.connected_users);
+	list_destroy(&canvas.connected_hosts);
+	list_destroy(&canvas.administrators);
+	list_destroy(&canvas.delta);
+	sqlite3_close(canvas.backing_db);
 	return 0;
 }
