@@ -575,43 +575,6 @@ void level_up(struct user *user) {
 	cJSON_Delete(response);
 }
 
-cJSON *handle_get_canvas(const cJSON *user_id) {
-	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
-	struct user *user = find_in_connected_users(user_id->valuestring);
-	if (!user) return error_response("Not authenticated");
-
-	bool within_limit = is_within_rate_limit(&user->canvas_limiter);
-	if (!within_limit) {
-		logr("%s exceeded canvas rate limit\n", user->uuid);
-		return error_response("Rate limit exceeded");
-	}
-
-	user->last_event_unix = (unsigned)time(NULL);
-
-	struct timeval tmr;
-	gettimeofday(&tmr, NULL);
-
-	// nab a copy of the data, avoid blocking updates for others.
-	uint8_t *copy;
-	size_t copy_len;
-	float copy_ratio;
-	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
-	pthread_mutex_lock(&g_canvas.canvas_cache_lock);
-	copy_len = g_canvas.canvas_cache_len;
-	copy_ratio = g_canvas.canvas_cache_compression_ratio;
-	copy = malloc(copy_len);
-	memcpy(copy, g_canvas.canvas_cache, copy_len);
-	pthread_mutex_unlock(&g_canvas.canvas_cache_lock);
-	//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!//!
-	long ms = get_ms_delta(tmr);
-	char buf[64];
-	human_file_size(copy_len, buf);
-	logr("Sending zlib'd canvas to %s. (%.2f%%, %s, %lums)\n", user->uuid, copy_ratio, buf, ms);
-	mg_ws_send(user->socket, (char *)copy, copy_len, WEBSOCKET_OP_BINARY);
-	free(copy);
-	return NULL;
-}
-
 cJSON *handle_get_tile_info(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param) {
 	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
@@ -648,66 +611,6 @@ cJSON *new_tile_update(size_t x, size_t y, uint8_t color_id) {
 	cJSON_AddNumberToObject(response, "i", idx);
 	cJSON_AddNumberToObject(response, "c", color_id);
 	return response;
-}
-
-cJSON *handle_post_tile(const cJSON *user_id, const cJSON *x_param, const cJSON *y_param, const cJSON *color_id_param, const char *raw_request, size_t raw_request_length) {
-	if (!cJSON_IsString(user_id)) return error_response("Invalid userID");
-	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
-	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
-	if (!cJSON_IsNumber(color_id_param)) return error_response("colorID not a number");
-
-	struct user *user = find_in_connected_users(user_id->valuestring);
-
-	if (!user) return error_response("Not authenticated");
-	//if (user->remaining_tiles < 1) return error_response("No tiles remaining");
-
-	if (!is_within_rate_limit(&user->tile_limiter)) {
-		return NULL;
-	}
-
-	uint8_t color_id = color_id_param->valueint;
-	size_t x = x_param->valueint;
-	size_t y = y_param->valueint;
-
-	if (x > g_canvas.edge_length - 1) return error_response("Invalid X coordinate");
-	if (y > g_canvas.edge_length - 1) return error_response("Invalid Y coordinate");
-	if (color_id > g_canvas.color_list.amount - 1) return error_response("Invalid colorID");
-
-	user->remaining_tiles--;
-	user->total_tiles_placed++;
-	user->current_level_progress++;
-	if (user->current_level_progress >= user->tiles_to_next_level) {
-		level_up(user);
-	}
-	user->last_event_unix = (unsigned)time(NULL);
-
-	if (user->is_shadow_banned) {
-		logr("Rejecting request from shadowbanned user: %.*s\n", (int)raw_request_length, raw_request);
-		return new_tile_update(x, y, color_id);
-	}
-
-	// This print is for compatibility with https://github.com/zouppen/pikselipeli-parser
-	logr("Received request: %.*s\n", (int)raw_request_length, raw_request);
-
-	struct tile *tile = &g_canvas.tiles[x + y * g_canvas.edge_length];
-	tile->color_id = color_id;
-	tile->place_time_unix = user->last_event_unix;
-	memcpy(tile->last_modifier, user->uuid, sizeof(tile->last_modifier));
-
-	// Record delta for persistence. These get flushed to disk every canvas_save_interval_sec seconds.
-	struct tile_placement placement = {
-		.x = x,
-		.y = y,
-		.tile = *tile
-	};
-	list_append(g_canvas.delta, placement);
-
-	g_canvas.dirty = true;
-
-	cJSON *update = new_tile_update(x, y, color_id);
-	broadcast(update);
-	cJSON_Delete(update);
-	return NULL; // The broadcast takes care of this
 }
 
 cJSON *handle_get_colors(const cJSON *user_id) {
@@ -1048,7 +951,6 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 	const cJSON *name      = cJSON_GetObjectItem(command, "name");
 	const cJSON *x         = cJSON_GetObjectItem(command, "X");
 	const cJSON *y         = cJSON_GetObjectItem(command, "Y");
-	const cJSON *color_id  = cJSON_GetObjectItem(command, "colorID");
 	const cJSON *admin_cmd = cJSON_GetObjectItem(command, "cmd");
 	char *reqstr = request_type->valuestring;
 
@@ -1058,12 +960,8 @@ cJSON *handle_command(const char *cmd, size_t len, struct mg_connection *connect
 		response = handle_initial_auth(connection, host);
 	} else if (str_eq(reqstr, "auth")) {
 		response = handle_auth(user_id, connection);
-	} else if (str_eq(reqstr, "getCanvas")) {
-		response = handle_get_canvas(user_id);
 	} else if (str_eq(reqstr, "gti")) {
 		response = handle_get_tile_info(user_id, x, y);
-	}else if (str_eq(reqstr, "postTile")) {
-		response = handle_post_tile(user_id, x, y, color_id, cmd, len);
 	} else if (str_eq(reqstr, "getColors")) {
 		response = handle_get_colors(user_id);
 	} else if (str_eq(reqstr, "setUsername")) {
