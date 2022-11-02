@@ -1050,12 +1050,17 @@ struct request {
 };
 
 char *handle_req_auth(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	(void)req;
+	(void)c;
+	(void)response_len;
 	//TODO
 	logr("TODO: req_auth\n");
 	return NULL;
 }
 
 char *handle_req_get_canvas(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	(void)c;
+	(void)response_len;
 	struct user *user = find_in_connected_users(req->uuid);
 	if (!user) return error(ERR_INVALID_UUID);
 
@@ -1094,6 +1099,9 @@ char *handle_req_get_canvas(const struct request *req, struct mg_connection *c, 
 
 char *handle_req_get_tile_info(const struct request *req, struct mg_connection *c, size_t *response_len) {
 	//TODO
+	(void)req;
+	(void)c;
+	(void)response_len;
 	logr("TODO: req_get_tile_info\n");
 	return NULL;
 }
@@ -1114,6 +1122,8 @@ void dump_req(const struct request *req) {
 }
 
 char *handle_req_post_tile(const struct request *req, struct mg_connection *c, size_t *response_len) {
+	(void)c;
+	(void)response_len;
 	struct user *user = find_in_connected_users(req->uuid);
 
 	if (!user) return error(ERR_INVALID_UUID);
@@ -1178,7 +1188,8 @@ char *handle_req_post_tile(const struct request *req, struct mg_connection *c, s
 }
 
 char *handle_req_get_colors(const struct request *req, struct mg_connection *c, size_t *response_len) {
-	printf("Got to colorlist thing\n");
+	(void)c;
+	(void)response_len;
 	struct user *user = find_in_connected_users(req->uuid);
 	if (!user) return error(ERR_INVALID_UUID);
 
@@ -1197,6 +1208,9 @@ char *handle_req_get_colors(const struct request *req, struct mg_connection *c, 
 char *handle_req_set_username(const struct request *req, struct mg_connection *c, size_t *response_len) {
 	//TODO
 	logr("TODO: req_set_username\n");
+	(void)req;
+	(void)c;
+	(void)response_len;
 	return NULL;
 }
 
@@ -1211,6 +1225,10 @@ struct initial_auth_response {
 };
 
 char *handle_req_initial_auth(const struct request *req, struct mg_connection *socket, size_t *response_len, struct remote_host *host) {
+	(void)req;
+	(void)socket;
+	(void)response_len;
+	(void)host;
 	return NULL;
 	/*
 	if (host) {
