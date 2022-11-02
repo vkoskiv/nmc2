@@ -192,6 +192,36 @@ static bool g_do_db_backup = false;
 void start_user_timer(struct user *user, struct mg_mgr *mgr);
 void send_user_count(const struct canvas *c);
 
+struct tile_update {
+	uint8_t resp_type;
+	uint8_t color_id;
+	//2 bytes of padding :(
+	uint32_t i;
+};
+
+enum response_id {
+	RES_AUTH_SUCCESS = 0,
+	RES_CANVAS,
+	RES_TILE_INFO,
+	RES_TILE_UPDATE,
+	RES_COLOR_LIST,
+	RES_USERNAME_SET_SUCCESS,
+	RES_TILE_INCREMENT,
+	RES_LEVEL_UP,
+	RES_USER_COUNT,
+	ERR_INVALID_UUID = 128,
+	ERR_OUT_OF_TILES,
+	ERR_RATE_LIMIT_EXCEEDED,
+};
+
+void bin_broadcast(const struct canvas *c, const char *payload, size_t len) {
+	struct list_elem *elem = NULL;
+	list_foreach_ro(elem, c->connected_users) {
+		struct user *user = (struct user *)elem->thing;
+		mg_ws_send(user->socket, payload, len, WEBSOCKET_OP_BINARY);
+	}
+}
+
 void generate_uuid(char *buf) {
 	if (!buf) return;
 	uuid_t uuid;
@@ -607,14 +637,6 @@ cJSON *handle_get_tile_info(struct canvas *c, const cJSON *user_id, const cJSON 
 	return response;
 }
 
-cJSON *new_tile_update(size_t edge_length, size_t x, size_t y, uint8_t color_id) {
-	size_t idx = x + y * edge_length;
-	cJSON *response = base_response("tu");
-	cJSON_AddNumberToObject(response, "i", idx);
-	cJSON_AddNumberToObject(response, "c", color_id);
-	return response;
-}
-
 cJSON *handle_get_colors(struct canvas *c, const cJSON *user_id) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	struct user *user = find_in_connected_users(c, user_id->valuestring);
@@ -747,9 +769,12 @@ static void admin_place_tile(struct canvas *c, int x, int y, uint8_t color_id, c
 
 	c->dirty = true;
 
-	cJSON *update = new_tile_update(c->edge_length, x, y, color_id);
-	broadcast(c, update);
-	cJSON_Delete(update);
+	struct tile_update response = {
+		.resp_type = RES_TILE_UPDATE,
+		.color_id = color_id,
+		.i = htonl(x + y * c->edge_length),
+	};
+	bin_broadcast(c, (const char *)&response, sizeof(response));
 }
 
 cJSON *handle_admin_brush(struct canvas *c, const cJSON *coordinates, const cJSON *colorID, const char *uuid) {
@@ -773,8 +798,7 @@ cJSON *handle_admin_brush(struct canvas *c, const cJSON *coordinates, const cJSO
 		}
 	}
 
-	cJSON *payload = base_response("brush_success");
-	return payload;
+	return NULL;
 }
 
 cJSON *handle_admin_command(struct canvas *c, const cJSON *user_id, const cJSON *command) {
@@ -992,21 +1016,6 @@ enum request_type {
 	REQ_SET_USERNAME,
 };
 
-enum response_id {
-	RES_AUTH_SUCCESS = 0,
-	RES_CANVAS,
-	RES_TILE_INFO,
-	RES_TILE_UPDATE,
-	RES_COLOR_LIST,
-	RES_USERNAME_SET_SUCCESS,
-	RES_TILE_INCREMENT,
-	RES_LEVEL_UP,
-	RES_USER_COUNT,
-	ERR_INVALID_UUID = 128,
-	ERR_OUT_OF_TILES,
-	ERR_RATE_LIMIT_EXCEEDED,
-};
-
 char *ack(enum response_id e) {
 	char *response = malloc(1);
 	*response = (char)e;
@@ -1015,14 +1024,6 @@ char *ack(enum response_id e) {
 
 char *error(enum response_id e) {
 	return ack(e);
-}
-
-void bin_broadcast(const struct canvas *c, const char *payload, size_t len) {
-	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, c->connected_users) {
-		struct user *user = (struct user *)elem->thing;
-		mg_ws_send(user->socket, payload, len, WEBSOCKET_OP_BINARY);
-	}
 }
 
 struct user_count {
@@ -1110,13 +1111,6 @@ char *handle_req_get_tile_info(struct canvas *c, const struct request *req, stru
 	logr("TODO: req_get_tile_info\n");
 	return NULL;
 }
-
-struct tile_update {
-	uint8_t resp_type;
-	uint8_t color_id;
-	//2 bytes of padding :(
-	uint32_t i;
-};
 
 void dump_req(const struct request *req) {
 	printf("request_type: %i\n", req->request_type);
