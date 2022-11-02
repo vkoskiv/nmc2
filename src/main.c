@@ -1768,9 +1768,8 @@ bail:
 	canvas->dirty = false;
 }
 
-void ensure_tiles_table(struct canvas *c) {
+void ensure_tiles_table(sqlite3 *db, size_t edge_length) {
 	// Next, ensure we've got tiles in there.
-	sqlite3 *db = c->backing_db;
 	sqlite3_stmt *count;
 	int ret = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tiles", -1, &count, NULL);
 	if (ret != SQLITE_OK) {
@@ -1798,8 +1797,8 @@ void ensure_tiles_table(struct canvas *c) {
 	ret = sqlite3_prepare_v2(db, "INSERT INTO tiles (X, Y, colorID, lastModifier, placeTime) VALUES (?, ?, 3, \"\", 0)", -1, &insert, NULL);
 	if (ret != SQLITE_OK) printf("Failed to prepare tile insert: %s\n", sqlite3_errmsg(db));
 
-	for (size_t y = 0; y < c->settings.new_db_canvas_size; ++y) {
-		for (size_t x = 0; x < c->settings.new_db_canvas_size; ++x) {
+	for (size_t y = 0; y < edge_length; ++y) {
+		for (size_t x = 0; x < edge_length; ++x) {
 			ret = sqlite3_bind_int(insert, 1, x);
 			if (ret != SQLITE_OK) printf("Failed to bind x: %s\n", sqlite3_errmsg(db));
 			ret = sqlite3_bind_int(insert, 2, y);
@@ -1834,7 +1833,7 @@ void ensure_valid_db(struct canvas *c) {
 		exit(-1);
 	}
 	free(schema);
-	ensure_tiles_table(c); // Generate canvas if needed
+	ensure_tiles_table(c->backing_db, c->settings.new_db_canvas_size);
 }
 
 bool load_tiles(struct canvas *c) {
