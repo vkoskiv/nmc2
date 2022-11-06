@@ -120,6 +120,7 @@ struct canvas {
 	struct params settings;
 	struct color_list color_list;
 	char *color_response_cache;
+	size_t color_response_cache_len;
 	pthread_t canvas_worker_thread;
 	pthread_mutex_t canvas_cache_lock;
 	uint8_t *canvas_cache;
@@ -637,14 +638,6 @@ cJSON *handle_get_tile_info(struct canvas *c, const cJSON *user_id, const cJSON 
 	return response;
 }
 
-cJSON *handle_get_colors(struct canvas *c, const cJSON *user_id) {
-	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
-	struct user *user = find_in_connected_users(c, user_id->valuestring);
-	if (!user) return error_response("Not authenticated");
-	user->last_event_unix = (unsigned)time(NULL);
-	return cJSON_Parse(c->color_response_cache);
-}
-
 cJSON *handle_set_nickname(struct canvas *c, const cJSON *user_id, const cJSON *name) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	if (!cJSON_IsString(name)) return error_response("No nickname provided");
@@ -988,8 +981,6 @@ cJSON *handle_command(struct canvas *c, const char *cmd, size_t len, struct mg_c
 		response = handle_auth(c, user_id, connection);
 	} else if (str_eq(reqstr, "gti")) {
 		response = handle_get_tile_info(c, user_id, x, y);
-	} else if (str_eq(reqstr, "getColors")) {
-		response = handle_get_colors(c, user_id);
 	} else if (str_eq(reqstr, "setUsername")) {
 		response = handle_set_nickname(c, user_id, name);
 	} else if (str_eq(reqstr, "admin_cmd")) {
@@ -1188,22 +1179,13 @@ char *handle_req_post_tile(struct canvas *c, const struct request *req, struct m
 }
 
 char *handle_req_get_colors(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
-	(void)c;
 	(void)connection;
-	(void)response_len;
 	struct user *user = find_in_connected_users(c, req->uuid);
 	if (!user) return error(ERR_INVALID_UUID);
-
 	user->last_event_unix = (unsigned)time(NULL);
-	//TODO: cache as well maybe
-
-	char *response = malloc(1 + c->color_list.amount * sizeof(struct color));
-	response[0] = RES_COLOR_LIST;
-	struct color *list = (struct color *)response + 1;
-	for (size_t i = 0; i < c->color_list.amount; ++i) {
-		list[i] = c->color_list.colors[i];
-	}
-	return response;
+	mg_ws_send(user->socket, c->color_response_cache, c->color_response_cache_len, WEBSOCKET_OP_BINARY);
+	if (response_len) *response_len = 0;
+	return NULL;
 }
 
 char *handle_req_set_username(struct canvas *canvas, const struct request *req, struct mg_connection *c, size_t *response_len) {
@@ -1337,15 +1319,14 @@ char *handle_binary_command(struct canvas *c, const char *request, size_t len, s
 
 void update_color_response_cache(struct canvas *c) {
 	if (c->color_response_cache) free(c->color_response_cache);
-
-	cJSON *response_object = base_response("colorList");
-	cJSON *color_list = cJSON_CreateArray();
+	c->color_response_cache_len = 1 + c->color_list.amount * sizeof(struct color);
+	c->color_response_cache = malloc(c->color_response_cache_len);
+	char *ptr = c->color_response_cache;
+	ptr[0] = RES_COLOR_LIST;
+	struct color *list = (struct color *)(ptr + 1);
 	for (size_t i = 0; i < c->color_list.amount; ++i) {
-		cJSON_InsertItemInArray(color_list, i + 1, color_to_json(c->color_list.colors[i]));
+		list[i] = c->color_list.colors[i];
 	}
-	cJSON_AddItemToObject(response_object, "colors", color_list);
-	c->color_response_cache = cJSON_PrintUnformatted(response_object);
-	cJSON_Delete(response_object);
 }
 
 void do_db_backup(struct canvas *c) {
