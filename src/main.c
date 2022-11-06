@@ -638,12 +638,40 @@ cJSON *handle_get_tile_info(struct canvas *c, const cJSON *user_id, const cJSON 
 	return response;
 }
 
+bool nick_taken(sqlite3 *db, const char *nick) {
+	sqlite3_stmt *query;
+	int ret = sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM users WHERE username = ?", -1, &query, NULL);
+	if (ret != SQLITE_OK) {
+		printf("Failed to create count query\n");
+		sqlite3_finalize(query);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	ret = sqlite3_bind_text(query, 1, nick, strlen(nick), NULL);
+	if (ret != SQLITE_OK) {
+		logr("Failed to bind nick to reserved check query: %s\n", sqlite3_errmsg(db));
+		return true;
+	}
+	ret = sqlite3_step(query);
+	if (ret != SQLITE_ROW) {
+		printf("No rows in nick_taken COUNT(*)\n");
+		sqlite3_finalize(query);
+		sqlite3_close(db);
+		exit(-1);
+	}
+	size_t count = sqlite3_column_int(query, 0);
+	sqlite3_finalize(query);
+	return count > 0;
+}
+
 cJSON *handle_set_nickname(struct canvas *c, const cJSON *user_id, const cJSON *name) {
 	if (!cJSON_IsString(user_id)) return error_response("No userID provided");
 	if (!cJSON_IsString(name)) return error_response("No nickname provided");
+	if (strlen(name->valuestring) == 0) return error_response("No nickname provided");
 	struct user *user = find_in_connected_users(c, user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 	if (strlen(name->valuestring) > sizeof(user->user_name)) return error_response("Nickname too long");
+	if (nick_taken(c->backing_db, name->valuestring)) return error_response("Nickname already taken");
 	logr("User %s set their username to %s\n", user_id->valuestring, name->valuestring);
 	strncpy(user->user_name, name->valuestring, sizeof(user->user_name) - 1);
 	user->last_event_unix = (unsigned)time(NULL);
