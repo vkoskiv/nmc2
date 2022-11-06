@@ -627,14 +627,17 @@ cJSON *handle_get_tile_info(struct canvas *c, const cJSON *user_id, const cJSON 
 	if (y > c->edge_length - 1) return error_response("Invalid Y coordinate");
 
 	struct tile *tile = &c->tiles[x + y * c->edge_length];
+	bool free_user = false;
 	struct user *queried_user = find_in_connected_users(c, tile->last_modifier);
-	if (!queried_user) user = try_load_user(c, tile->last_modifier);
-	if (!queried_user) return error_response("Couldn't find a user who modified that tile.");
-
+	if (!queried_user) {
+		queried_user = try_load_user(c, tile->last_modifier);
+		free_user = true;
+	}
 	cJSON *response = base_response("ti");
 	cJSON_AddStringToObject(response, "un", queried_user->user_name);
 	cJSON_AddNumberToObject(response, "pt", tile->place_time_unix);
-
+	if (free_user) free(queried_user);
+	logr("Serving tileInfo for %s (%s) at %lu,%lu\n", user->uuid, user->user_name, x, y);
 	return response;
 }
 
