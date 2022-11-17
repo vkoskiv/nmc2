@@ -613,6 +613,12 @@ cJSON *handle_get_tile_info(struct canvas *c, const cJSON *user_id, const cJSON 
 	if (!cJSON_IsNumber(x_param)) return error_response("X coordinate not a number");
 	if (!cJSON_IsNumber(y_param)) return error_response("Y coordinate not a number");
 
+	struct administrator *admin = find_in_admins(c, user_id->valuestring);
+	if (!admin) {
+		logr("Rejecting getTileInfo for unknown user %s. Naughty naughty!\n", user_id->valuestring);
+		return error_response("Invalid admin userID");
+	}
+
 	struct user *user = find_in_connected_users(c, user_id->valuestring);
 	if (!user) return error_response("Not authenticated");
 
@@ -919,10 +925,13 @@ cJSON *handle_auth(struct canvas *c, const cJSON *user_id, struct mg_connection 
 	cJSON_AddNumberToObject(response, "tilesToNextLevel", uptr->tiles_to_next_level);
 	cJSON_AddNumberToObject(response, "levelProgress", uptr->current_level_progress);
 	struct administrator *admin = find_in_admins(c, uptr->uuid);
+	bool tile_info_available = false;
 	if (admin) {
 		cJSON_AddBoolToObject(response, "showBanBtn", admin->can_banclick);
 		cJSON_AddBoolToObject(response, "showCleanupBtn", admin->can_cleanup);
+		tile_info_available = true;
 	}
+	cJSON_AddBoolToObject(response, "tileInfoAvailable", tile_info_available);
 	return response;
 }
 
