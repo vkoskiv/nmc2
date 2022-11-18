@@ -725,23 +725,19 @@ cJSON *shut_down_server(void) {
 	return NULL;
 }
 
-cJSON *toggle_shadow_ban(struct canvas *c, const char *uuid) {
+cJSON *shadow_ban_user(struct canvas *c, const char *uuid, bool toggle) {
+	bool free_user = false;
 	struct user *user = find_in_connected_users(c, uuid);
-	if (!user) user = try_load_user(c, uuid);
+	if (!user) {
+		user = try_load_user(c, uuid);
+		free_user = true;
+	}
 	if (!user) return error_response("No user found with that uuid");
-	logr("Toggling is_shadow_banned to %s for user %s\n", !user->is_shadow_banned ? "true " : "false", uuid);
-	user->is_shadow_banned = !user->is_shadow_banned;
+	bool banned = toggle ? !user->is_shadow_banned : true;
+	logr("Setting is_shadow_banned to %s for user %s\n", banned ? "true" : "false", uuid);
+	user->is_shadow_banned = banned;
 	save_user(c, user);
-	return base_response("Success");
-}
-
-cJSON *shadow_ban_user(struct canvas *c, const char *uuid) {
-	struct user *user = find_in_connected_users(c, uuid);
-	if (!user) user = try_load_user(c, uuid);
-	if (!user) return error_response("No user found with that uuid");
-	logr("Setting is_shadow_banned to true for user %s\n", uuid);
-	user->is_shadow_banned = true;
-	save_user(c, user);
+	if (free_user) free(user);
 	return base_response("Success");
 }
 
@@ -760,13 +756,14 @@ cJSON *handle_ban_click(struct canvas *c, const cJSON *coordinates) {
 	if (y > c->edge_length - 1) return error_response("Invalid Y coordinate");
 
 	struct tile *tile = &c->tiles[x + y * c->edge_length];
+	// Just in case...
+	struct administrator *admin = find_in_admins(c, tile->last_modifier);
+	if (admin) return error_response("Refusing to shadowban an administrator");
+
 	struct user *user = find_in_connected_users(c, tile->last_modifier);
 	if (!user) user = try_load_user(c, tile->last_modifier);
 	if (!user) return error_response("Couldn't find a user who modified that tile.");
 	if (user->is_shadow_banned) return error_response("Already shadowbanned from there");
-	// Just in case...
-	struct administrator *admin = find_in_admins(c, user->uuid);
-	if (admin) return error_response("Refusing to shadowban an administrator");
 	logr("User %s shadowbanned from (%4lu,%4lu)\n", user->uuid, x, y);
 	user->is_shadow_banned = true;
 	save_user(c, user);
@@ -860,7 +857,7 @@ cJSON *handle_admin_command(struct canvas *c, const cJSON *user_id, const cJSON 
 	}
 	if (str_eq(action->valuestring, "toggle_shadowban")) {
 		if (admin->can_shadowban) {
-			return toggle_shadow_ban(c, message->valuestring);
+			return shadow_ban_user(c, message->valuestring, true);
 		} else {
 			return error_response("You don't have shadowban permission");
 		}
@@ -1094,8 +1091,6 @@ char *handle_req_auth(struct canvas *c, const struct request *req, struct mg_con
 }
 
 char *handle_req_get_canvas(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
-	(void)c;
-	(void)response_len;
 	(void)connection;
 	struct user *user = find_in_connected_users(c, req->uuid);
 	if (!user) return error(ERR_INVALID_UUID);
@@ -1130,6 +1125,7 @@ char *handle_req_get_canvas(struct canvas *c, const struct request *req, struct 
 	logr("Sending zlib'd canvas to %s. (%.2f%%, %s, %lums)\n", user->uuid, copy_ratio, buf, ms);
 	mg_ws_send(user->socket, (char *)copy, copy_len + 1, WEBSOCKET_OP_BINARY);
 	free(copy);
+	if (response_len) *response_len = 0;
 	return NULL;
 }
 
@@ -1152,8 +1148,6 @@ void dump_req(const struct request *req) {
 }
 
 char *handle_req_post_tile(struct canvas *c, const struct request *req, struct mg_connection *connection, size_t *response_len) {
-	(void)c;
-	(void)response_len;
 	(void)connection;
 	struct user *user = find_in_connected_users(c, req->uuid);
 
@@ -1215,6 +1209,7 @@ char *handle_req_post_tile(struct canvas *c, const struct request *req, struct m
 		.i = htonl(x + y * c->edge_length),
 	};
 	bin_broadcast(c, (const char *)&response, sizeof(response));
+	if (response_len) *response_len = 0;
 	return NULL; // The broadcast takes care of this
 }
 
