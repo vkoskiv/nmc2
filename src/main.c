@@ -19,6 +19,7 @@
 #include <signal.h>
 #include <zlib.h>
 #include <pthread.h>
+#include <bsd/libutil.h>
 
 struct color {
 	uint8_t red;
@@ -1946,6 +1947,20 @@ void start_worker_thread(struct canvas *c) {
 int main(void) {
 	setbuf(stdout, NULL); // Disable output buffering
 
+	struct pidfh *pfh;
+	pid_t otherpid;
+
+	pfh = pidfile_open("./nmc2.pid", 0600, &otherpid);
+	if (!pfh) {
+		if (errno == EEXIST) {
+			logr("ERROR: PID file says we're already running on pid %jd. Exiting.\n", (intmax_t)otherpid);
+			exit(-1);
+		}
+		logr("Warning: Unable to create pidfile in CWD!\n");
+	}
+
+	pidfile_write(pfh);
+
 	struct canvas canvas = (struct canvas){ 0 };
 	load_config(&canvas);
 
@@ -2028,5 +2043,6 @@ int main(void) {
 	list_destroy(&canvas.administrators);
 	list_destroy(&canvas.delta);
 	sqlite3_close(canvas.backing_db);
+	pidfile_remove(pfh);
 	return 0;
 }
