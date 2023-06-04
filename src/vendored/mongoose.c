@@ -4405,9 +4405,7 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
     }
   }
 
-  if (poll(fds, n, ms) < 0) {
-    MG_ERROR(("poll failed, errno: %d", MG_SOCK_ERRNO));
-  } else {
+  if (poll(fds, n, ms) > 0) {
     i = 0;
     for (struct mg_connection *c = mgr->conns; c != NULL; c = c->next, i++) {
       if (c->is_closing || c->is_resolving || FD(c) == INVALID_SOCKET) {
