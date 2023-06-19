@@ -4406,7 +4406,7 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
   }
 
   if (poll(fds, n, ms) < 0) {
-    MG_ERROR(("poll failed, errno: %d", MG_SOCK_ERRNO));
+    //MG_ERROR(("poll failed, errno: %d", MG_SOCK_ERRNO));
   } else {
     i = 0;
     for (struct mg_connection *c = mgr->conns; c != NULL; c = c->next, i++) {
