@@ -2,10 +2,10 @@
 
 nmc2 - new backend websocket server for No Man's Canvas
 
-Dependencies: sqlite3, uuid, zlib, gcc with nested function support
+Dependencies: sqlite3, uuid, zlib, libbsd, gcc with nested function support
 You can try this, but it's linux so you'll probably have to google it anyway:
 
-Ubuntu: sudo apt install uuid-dev libsqlite3-dev zlib1g-dev
+Ubuntu: sudo apt install uuid-dev libsqlite3-dev zlib1g-dev libbsd-dev
 Arch: sudo pacman -S sqlite zlib
 
 To build: make -j4

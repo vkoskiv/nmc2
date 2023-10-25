@@ -1,6 +1,6 @@
 CC=cc
-CFLAGS=-g -Wall -Wextra -Wno-missing-field-initializers -std=c99 -D_GNU_SOURCE -O0 $$(pkg-config --cflags uuid)
-LDFLAGS=-lm -lsqlite3 -lz -lpthread -lbsd $$(pkg-config --libs uuid)
+CFLAGS=-g -Wall -Wextra -Wno-missing-field-initializers -std=c99 -D_GNU_SOURCE -O2 $$(pkg-config --cflags uuid sqlite3 zlib libbsd)
+LDFLAGS=-lm -lpthread $$(pkg-config --libs uuid sqlite3 zlib libbsd)
 BIN=bin/nmc2
 OBJDIR=bin/obj
 SRCS=$(shell find . -name '*.c')
