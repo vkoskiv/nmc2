@@ -20,3 +20,7 @@ $(BIN): $(OBJS) $(OBJDIR)
 
 clean:
 	rm -rf bin/*
+
+.PHONY: run
+run: all
+	@bin/nmc2
