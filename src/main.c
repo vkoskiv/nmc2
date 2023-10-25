@@ -1517,6 +1517,7 @@ void load_config(struct canvas *c) {
 		if (!cJSON_IsBool(announce)) continue;
 		if (!cJSON_IsBool(shadowban)) continue;
 		if (!cJSON_IsBool(banclick)) continue;
+		if (str_eq(uuid->valuestring, "<Desired userID here>")) continue;
 		struct administrator a = (struct administrator){
 			.can_shutdown  = cJSON_IsBool(shutdown)  ? shutdown->valueint  : false,
 			.can_announce  = cJSON_IsBool(announce)  ? announce->valueint  : false,
@@ -1963,17 +1964,6 @@ int main(void) {
 
 	struct canvas canvas = (struct canvas){ 0 };
 	load_config(&canvas);
-
-	struct list_elem *elem = NULL;
-	list_foreach_ro(elem, canvas.administrators) {
-		struct administrator *admin = (struct administrator *)elem->thing;
-
-		if (str_eq(admin->uuid, "<Desired userID here>")) {
-			logr("Warning - Admin UUID still at default, anyone can shut down this server.\n");
-			logr("Substitute uuid in params.json admin list with your desired UUID before running.\n");
-			exit(-1);
-		}
-	}
 
 	if (signal(SIGINT, sig_handler) == SIG_ERR) {
 		printf("Failed to register sigint handler\n");
