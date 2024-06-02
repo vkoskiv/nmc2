@@ -220,7 +220,6 @@ class Canvas {
 			this.is_dragging = false;
 		})
 
-		// Mouse wheel event for zooming
 		this.elem.addEventListener('wheel', (e) => {
 			e.preventDefault();
 			const mouseX = e.clientX - this.offset.x;
