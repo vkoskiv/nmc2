@@ -266,26 +266,37 @@ const bin = {
 };
 
 class PixelClient {
-	constructor(url) {
-		if (!url) throw new Error('Missing websocket URL');
+	connect() {
 		try {
 			this.ws = new WebSocket(url);
 		} catch (e) {
-			throw new Error(`Failed to open websocket connection to ${url}: ${error.message}`)
+			throw new Error(`Failed to open websocket connection to ${url}: ${e.message}`)
 		}
+		this.ws.binaryType = "arraybuffer";
+		this.ws.onopen = this.on_open.bind(this);
+		this.ws.onmessage = this.on_message.bind(this);
+		this.ws.onclose = this.on_close.bind(this);
+		this.ws.onerror = function(err) {
+			// console.log('Socket error: ' + err.message);
+			// this.ws.close();
+		}
+	}
+	constructor(url) {
+		if (!url) throw new Error('Missing websocket URL');
 		this.state = {
 			user_id: window.localStorage.getItem('userID'),
 			remaining_tiles: 0,
 			max_tiles: 0,
 			user_count: 0, // TODO: Update UI for these somehow
+			disconnected: false,
+			url: url,
+			admin_perms: {
+				ban: false,
+				cleanup: false,
+				tile_info: false,
+			},
 		};
-		this.ws.binaryType = "arraybuffer";
-		this.ws.onopen = this.on_open.bind(this);
-		this.ws.onmessage = this.on_message.bind(this);
-		this.ws.onclose = this.on_close.bind(this);
-		this.ws.onerror = this.on_error.bind(this);
-
-		// this.state.canvas = set_up_canvas(this);    
+		this.connect();
 		this.state.canvas = new Canvas(this);
 	}
 	on_open() {
@@ -296,10 +307,12 @@ class PixelClient {
 		}
 	}
 	on_close() {
-		// TODO
-	}
-	on_error() {
-		// TODO
+		if (this.state.disconnected) {
+			// Intentional disconnect
+		} else {
+			console.log("Lost socket, wait a bit and reconnect");
+			setTimeout(this.connect.bind(this), 2000 * Math.random());
+		}
 	}
 	on_message(m) {
 		if (m.data instanceof ArrayBuffer) {
@@ -450,6 +463,10 @@ class PixelClient {
 				this.ws.send(struct('B37s').pack(req.GET_COLORS, this.state.user_id));
 				this.state.max_tiles = data.maxTiles;
 				this.state.remaining_tiles = data.remainingTiles;
+				this.state.admin_perms.ban = data.showBanBtn || false;
+				this.state.admin_perms.cleanup = data.showCleanupBtn || false;
+				this.state.admin_perms.tile_info = data.tileInfoAvailable || false;
+				console.log(this.state.admin_perms);
 				// actions.setLevel(data.level)
 				// actions.setUserRequiredExp(data.tilesToNextLevel)
 				// actions.setUserExp(data.levelProgress)
@@ -461,6 +478,8 @@ class PixelClient {
 				// actions.toggleBanMode()
 				break;
 			case "kicked":
+				this.state.disconnected = true;
+				this.ws.close();
 				// g_disconnected = true;
 				// g_socket.close()
 				// actions.setKickDialogText(data.message)
@@ -480,7 +499,7 @@ class PixelClient {
 }
 
 try {
-  const client = new PixelClient(url);
+	const client = new PixelClient(url);
 } catch (e) {
-  console.error(error.message);
+	console.error(e.message);
 }
