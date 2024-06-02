@@ -14,18 +14,18 @@
     <!-- </div> -->
     <canvas style="image-rendering: pixelated;" id="canvas"></canvas>
   </div>
-  <div class="bottomBar">
-    <button type="button" class="setNickButton">Set Nickname</button>
+  <div id='bottom_bar' class="bottomBar">
+    <button type="button" id='set_nick' class="setNickButton">Set Nickname</button>
     <div id="color-container" tabindex="1"></div>
     <div class="progressContainer">
-      <div class="progressBar" style="width: 100%;"></div>
+      <div id='progress_bar' class="progressBar" style="width: 100%;"></div>
     </div>
-    <div class="statsArea">
+    <div id='online' class="statsArea">
       <span>Online: 1</span>
     </div>
     <div class="creatorArea">
-      <button class="creditsButton">About</button>
-      <button class="adminButton">Admin</button>
+      <button id='credits' class="creditsButton">About</button>
+      <button id='admin' class="adminButton">Admin</button>
     </div>
   </div>
   <script defer="defer" src="main.js"></script>

@@ -93,6 +93,28 @@ async function decompress(data) {
 	return Array.from(decomp_arr);
 }
 
+class BottomBar {
+	constructor() {
+		this.elem = document.getElementById('bottom_bar');
+		this.nick_btn = document.getElementById('set_nick');
+		this.progress_bar = document.getElementById('progress_bar');
+		this.online = document.getElementById('online');
+		this.about = document.getElementById('credits');
+		this.about.addEventListener('click', this.pressed_about.bind(this));
+		this.admin = document.getElementById('admin');
+		this.admin.addEventListener('click', this.pressed_admin.bind(this));
+	}
+
+	set_online_count(count) {
+		this.online.innerHTML = '<span>Online: ' + count + '</span>';
+	}
+
+	pressed_admin() {
+	}
+	pressed_about() {
+	}
+}
+
 class ColorList {
 	constructor(colors) {
 		this.colors = [];
@@ -325,6 +347,7 @@ class PixelClient {
 		};
 		this.connect();
 		this.state.canvas = new Canvas(this);
+		this.state.bottom_bar = new BottomBar();
 	}
 	on_open() {
 		if (this.state.user_id !== null) {
@@ -410,6 +433,7 @@ class PixelClient {
 				let i = struct('BxH');
 				let [_, c] = i.unpack(m.data);
 				this.state.user_count = c;
+				this.state.bottom_bar.set_online_count(c);
 				return;
 			}
 			case bin.ERR_INVALID_UUID:
@@ -460,6 +484,7 @@ class PixelClient {
 
 			case "userCount":
 				this.state.user_count = data.count;
+				this.state.bottom_bar.set_online_count(data.count);
 				break;
 
 			case "levelUp":
