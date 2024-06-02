@@ -173,13 +173,8 @@ class Canvas {
 			this.mouse_start.y = e.screenY;
 		});
 
-		document.addEventListener('onclick', (e) => {
-			e.preventDefault();
-			console.log("onclick");
-		});
-
 		// Mouse move event to handle dragging
-		document.addEventListener('mousemove', (e) => {
+		this.elem.addEventListener('mousemove', (e) => {
 			if (this.mouse_down) {
 				// Prevent accidental canvas drag when clicking
 				const mouse_x = e.screenX - this.mouse_start.x;
@@ -212,7 +207,7 @@ class Canvas {
 		});
 
 		// Mouse up event to stop dragging
-		document.addEventListener('mouseup', (e) => {
+		this.elem.addEventListener('mouseup', (e) => {
 			if (!this.is_dragging) {
 				this.on_click(e);
 			}
@@ -220,8 +215,13 @@ class Canvas {
 			this.is_dragging = false;
 		});
 
+		this.elem.addEventListener('mouseout', (e) => {
+			this.mouse_down = false;
+			this.is_dragging = false;
+		})
+
 		// Mouse wheel event for zooming
-		document.addEventListener('wheel', (e) => {
+		this.elem.addEventListener('wheel', (e) => {
 			e.preventDefault();
 			const mouseX = e.clientX - this.offset.x;
 			const mouseY = e.clientY - this.offset.y;
