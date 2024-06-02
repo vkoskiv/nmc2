@@ -93,6 +93,54 @@ async function decompress(data) {
 	return Array.from(decomp_arr);
 }
 
+class ColorList {
+	constructor(colors) {
+		this.colors = [];
+		this.selected_index = window.localStorage.getItem('selected_color') || 0;
+		this.active_color = 0;
+
+		for (var i = 0; i < colors.length; i++) {
+			this.colors.push({ 'id': colors[i].ID, 'color': this.rgb_to_hex(colors[i].R, colors[i].G, colors[i].B) });
+		}
+		this.container = document.getElementById("color-container");
+		this.container.innerHTML = '';
+		this.colors.forEach((color, index) => {
+			const color_square = document.createElement('div');
+			color_square.className = 'color-square';
+			color_square.style.backgroundColor = color.color;
+			color_square.dataset.index = index;
+			this.container.appendChild(color_square);
+			color_square.addEventListener('click', () => {
+				this.select_color(index);
+			});
+		});
+		this.select_color(this.selected_index);
+	}
+	select_color(index) {
+		// if (this.selected_index === index) return;
+		if (this.selected_index !== -1) {
+			console.log(this.container);
+			this.container.children[this.selected_index].classList.remove('selected');
+		}
+		this.selected_index = index;
+		this.container.children[this.selected_index].classList.add('selected');
+		this.active_color = this.colors[this.selected_index].id;
+		window.localStorage.setItem("selected_color", this.selected_index);
+	}
+	rgb_to_hex(r, g, b) {
+		return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+	}
+	get_color(id) {
+		return this.colors.filter(function (c) { return c.id === id })[0].color;
+	}
+	selected_color() {
+		return this.get_color(this.active_color);
+	}
+	selected_color_id() {
+		return this.active_color;
+	}
+}
+
 class Canvas {
 	constructor(client) {
 		this.client = client;
@@ -111,10 +159,8 @@ class Canvas {
 			visible: false,
 			// TODO
 		};
-		this.colors = {};
 		this.size = 0;
 		this.client = client;
-		this.active_color = 0;
 		this.pixels = [];
 
 		document.body.style.mozUserSelect = document.body.style.webkitUserSelect = document.body.style.userSelect = 'none';
@@ -152,7 +198,7 @@ class Canvas {
 				if (pix_x === this.prev_pix.x && pix_y === this.prev_pix.y) return;
 				const pix_idx = pix_y * this.size + pix_x;
 				const color = this.pixels[pix_idx];
-				this.ctx.fillStyle = this.get_color(this.active_color);
+				this.ctx.fillStyle = this.color_list.selected_color();
 				this.ctx.globalAlpha = 0.4;
 				this.ctx.fillRect(pix_x, pix_y, 1, 1);
 				this.ctx.globalAlpha = 1.0;
@@ -191,36 +237,18 @@ class Canvas {
 		
 	}
 
-	rgb_to_hex(r, g, b) {
-		return "#" + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
-	}
-
-	set_colors(colors) {
-		for (var i = 0; i < colors.length; i++) {
-			this.colors[colors[i].ID] = this.rgb_to_hex(colors[i].R, colors[i].G, colors[i].B);
-		}
-		// for (const color in colors) {
-		// 	console.log(color);
-		// 	this.colors[color.ID] = this.rgb_to_hex(color.R, color.G, color.B);
-		// }
-	}
-
-	get_color(id) {
-		return this.colors[id];
-	}
-	
 	on_click(e) {
 		e.preventDefault();
 		const mouse_x = (e.pageX - this.offset.x) / this.scale;
 		const mouse_y = (e.pageY - this.offset.y) / this.scale;
 		const pix_x = Math.floor(mouse_x);
 		const pix_y = Math.floor(mouse_y);
-		this.client.send_tile(pix_x, pix_y, this.active_color);
+		this.client.send_tile(pix_x, pix_y, this.color_list.selected_color_id());
 		this.prev_pix.c = -1;
 	}
 	
 	draw_pixel(x, y, c) {
-		this.ctx.fillStyle = this.get_color(c);
+		this.ctx.fillStyle = this.color_list.get_color(c);
 		this.ctx.fillRect(x, y, 1, 1);
 	}
 	
@@ -361,7 +389,7 @@ class PixelClient {
 					let [r, g, b, id] = str.unpack(view);
 					colors[i] = { 'R': r, 'G': g, 'B': b, 'ID': id };
 				}
-				this.state.canvas.set_colors(colors);
+				this.state.canvas.color_list = new ColorList(colors);
 				this.ws.send(struct('B37s').pack(req.GET_CANVAS, this.state.user_id));
 				return;
 			}

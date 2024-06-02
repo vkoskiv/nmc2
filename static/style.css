@@ -93,31 +93,7 @@ scale div according to text length*/
   border-radius: 10px;
   border: 2px solid black;
 }
-.colorSelect {
-  display: flex;
-  align-items: center;
-}
 
-.colorSelect label {
-  width: 1.5em;
-  height: 1.5em;
-  border: 1px solid black;
-  border-radius: 5px;
-  margin: 3px;
-}
-
-.colorSelect input[type=checkbox]:checked + label {
-  border-width: 3px;
-  border-color: black;
-}
-
-.colorSelect label:hover {
-  cursor: pointer;
-}
-
-.colorSelect input[type=checkbox] {
-  display: none;
-}
 :root {
 	--main-text-color: #a8a8a8;
 	--dark-text-color: #696969;
@@ -160,15 +136,30 @@ scale div according to text length*/
   margin: 4px 7px;
 }
 
-.colorArea {
+#color-container {
   border: 1px solid black;
-  border-radius: 5px;
+  border-radius: 2px;
   background: var(--light-bg-color);
 
   display: flex;
   flex-flow: row wrap;
   align-items: center;
-  padding: 0 3px;
+  padding: 0 0px;
+}
+
+.color-square {
+  width: 1.5em;
+  height: 1.5em;
+  cursor: pointer;
+  border: 2px solid transparent;
+  outline: 2px solid transparent;
+  border-radius: 2px;
+  margin: 1px;
+  transition: outline-color 0.3s;
+}
+
+.color-square.selected {
+  outline-color: rgba(255, 255, 255, 0.8);
 }
 
 .progressContainer {
